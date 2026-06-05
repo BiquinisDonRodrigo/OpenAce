@@ -1,29 +1,4 @@
 services:
-  acestream-vpn:
-    image: qmcgaw/gluetun:latest
-    container_name: acestream-vpn
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - NET_ADMIN
-    environment:
-      - VPN_SERVICE_PROVIDER=protonvpn
-      - VPN_TYPE=wireguard
-      - WIREGUARD_PRIVATE_KEY=${WG_PRIVATE_KEY}
-      - VPN_PORT_FORWARDING=on
-      - SERVER_COUNTRIES=${ProtonCountries}
-      - HTTP_CONTROL_SERVER_ADDRESS=:8001
-      - HEALTH_TARGET_ADDRESSES=cloudflare.com:80
-      - TZ=${TZ:-Europe/Madrid}
-    volumes:
-      - ./gluetun-data:/tmp/gluetun
-    ports:
-      - "8888:8888"
-      - "8001:8001"
-    networks:
-      - acestream-net
-    restart: unless-stopped
-
   kubo:
     image: ipfs/kubo:latest
     container_name: kubo
@@ -58,19 +33,16 @@ services:
       ACESTREAM_PORT: "6878"
       IPFS_GATEWAY: "http://kubo:48080"
       DB_PATH: /openace/checkdb/data.db
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
     depends_on:
-      acestream-vpn:
-        condition: service_started
       kubo:
         condition: service_healthy
     volumes:
-      - ./gluetun-data:/tmp/gluetun
       - ./logs:/var/log/openace
       - ./data:/openace/checkdb
-    network_mode: service:acestream-vpn
+    ports:
+      - "8888:8888"
+    networks:
+      - acestream-net
     restart: unless-stopped
 
 networks:

@@ -1,0 +1,219 @@
+import time
+
+import requests
+
+from app.utils.logging_utils import log_event
+from app.utils.upstream import session
+
+COMPONENT = "acestream"
+
+# stat.status values that mean the engine is downloading and the stream is servable
+READY_STATUSES = {"dl", "dl_finished"}
+# stat.status values that mean a fatal failure (stop waiting)
+ERROR_STATUSES = {"err", "error"}
+# everything else (prebuf, buf, check, idle, ...) is treated as "still warming up"
+
+READY_TIMEOUT_S = 60
+POLL_INTERVAL_S = 0.5
+REQUEST_TIMEOUT_S = 5
+SESSION_RETRIES = 5
+SESSION_BACKOFF_S = 0.5
+_MAX_BACKOFF = 8.0
+
+# Per-channel ceiling for the /check probe: how long we wait for the engine to
+# resolve an infohash before declaring it a timeout.
+CHECK_TIMEOUT_S = 10
+
+
+def negotiate_stream(engine_url, content_id, *, ready_timeout=READY_TIMEOUT_S,
+                     poll_interval=POLL_INTERVAL_S, request_timeout=REQUEST_TIMEOUT_S,
+                     component=COMPONENT, log_context=None):
+    """Open an AceStream session via the JSON API and wait until it is ready to serve.
+
+    Uses ``/ace/getstream?id=...&format=json`` (returns immediately, no cold-start
+    500) to obtain the playback/stat/command URLs, then polls ``stat_url`` until the
+    engine reports a READY status. Returns a dict with ``playback_url``/``stat_url``/
+    ``command_url`` once ready, or ``None`` on failure/timeout.
+    """
+    log_context = log_context or {}
+    info = _open_session(engine_url, content_id, request_timeout, component, log_context)
+    if info is None:
+        return None
+    playback_url, stat_url, command_url = info
+
+    deadline = time.monotonic() + ready_timeout
+    last_status = None
+    while True:
+        status = _poll_status(stat_url, request_timeout, component, log_context)
+        if status in READY_STATUSES:
+            log_event("info", "acestream_ready", component, status=status, **log_context)
+            return {"playback_url": playback_url, "stat_url": stat_url, "command_url": command_url}
+        if status in ERROR_STATUSES:
+            log_event("warning", "acestream_stat_error", component, status=status, **log_context)
+            stop_stream(command_url, request_timeout=request_timeout,
+                        component=component, log_context=log_context)
+            return None
+        if status is not None:
+            last_status = status
+        if time.monotonic() >= deadline:
+            log_event("warning", "acestream_ready_timeout", component,
+                      last_status=last_status, **log_context)
+            stop_stream(command_url, request_timeout=request_timeout,
+                        component=component, log_context=log_context)
+            return None
+        time.sleep(poll_interval)
+
+
+def stop_stream(command_url, *, request_timeout=REQUEST_TIMEOUT_S, component=COMPONENT, log_context=None):
+    """Best-effort release of an AceStream session so the engine can free resources."""
+    if not command_url:
+        return
+    log_context = log_context or {}
+    try:
+        session.get(f"{command_url}?method=stop", timeout=request_timeout).close()
+        log_event("info", "acestream_stopped", component, **log_context)
+    except requests.RequestException as e:
+        log_event("warning", "acestream_stop_failed", component, error=str(e), **log_context)
+
+
+def _open_session(engine_url, content_id, request_timeout, component, log_context):
+    api_url = f"{engine_url}/ace/getstream?id={content_id}&format=json"
+    last_error = None
+    for attempt in range(1, SESSION_RETRIES + 1):
+        try:
+            resp = session.get(api_url, timeout=request_timeout)
+            try:
+                payload = resp.json()
+            finally:
+                resp.close()
+        except (requests.RequestException, ValueError) as e:
+            last_error = str(e)
+            log_event("warning", "acestream_session_attempt_failed", component,
+                      attempt=attempt, error=last_error, **log_context)
+            if attempt < SESSION_RETRIES:
+                time.sleep(min(SESSION_BACKOFF_S * (2 ** (attempt - 1)), _MAX_BACKOFF))
+            continue
+
+        if payload.get("error"):
+            log_event("warning", "acestream_session_error", component,
+                      error=payload["error"], **log_context)
+            return None
+        response = payload.get("response") or {}
+        playback_url = response.get("playback_url")
+        stat_url = response.get("stat_url")
+        command_url = response.get("command_url")
+        if not playback_url or not stat_url:
+            log_event("error", "acestream_missing_urls", component,
+                      response_keys=list(response.keys()), **log_context)
+            return None
+        log_event("info", "acestream_session_opened", component,
+                  is_live=response.get("is_live"), **log_context)
+        return playback_url, stat_url, command_url
+
+    log_event("error", "acestream_session_unavailable", component,
+              attempts=SESSION_RETRIES, last_error=last_error, **log_context)
+    return None
+
+
+def read_stat(stat_url, *, request_timeout=REQUEST_TIMEOUT_S, component=COMPONENT, log_context=None):
+    """Fetch a one-shot stat snapshot for an already-open session.
+
+    Returns the engine's ``response`` object (``status``/``peers``/``speed_down``/…),
+    ``{"status": "err"}`` if the engine reports an error, or ``None`` on a transport
+    failure. Reuses the shared upstream session, so it adds no connection setup cost.
+    """
+    log_context = log_context or {}
+    try:
+        resp = session.get(stat_url, timeout=request_timeout)
+        try:
+            data = resp.json()
+        finally:
+            resp.close()
+    except (requests.RequestException, ValueError) as e:
+        log_event("warning", "acestream_stat_failed", component, error=str(e), **log_context)
+        return None
+    if data.get("error"):
+        return {"status": "err"}
+    return data.get("response") or {}
+
+
+def _poll_status(stat_url, request_timeout, component, log_context):
+    stat = read_stat(stat_url, request_timeout=request_timeout, component=component, log_context=log_context)
+    if stat is None:
+        return None
+    return stat.get("status")
+
+
+def check_stream(engine_url, content_id, *, timeout=CHECK_TIMEOUT_S,
+                 poll_interval=POLL_INTERVAL_S, request_timeout=REQUEST_TIMEOUT_S,
+                 component=COMPONENT, log_context=None):
+    """Probe a single infohash sequentially and classify the outcome.
+
+    Opens one session, polls its stat until the engine reaches a READY status
+    (``live``), reports an error status (``dead``), or the overall ``timeout``
+    elapses (``timeout``). Transport failures or a rejected id map to ``error``/
+    ``dead``. Always releases the session. Returns a dict::
+
+        {"outcome": "live"|"dead"|"timeout"|"error",
+         "peers": int, "speed": int, "response_ms": int}
+
+    Unlike :func:`negotiate_stream`, the session is opened with a single request
+    (no retry/backoff) so one bad channel can't blow past the per-channel budget.
+    """
+    log_context = log_context or {}
+    start = time.monotonic()
+
+    def _elapsed_ms():
+        return int((time.monotonic() - start) * 1000)
+
+    api_url = f"{engine_url}/ace/getstream?id={content_id}&format=json"
+    try:
+        resp = session.get(api_url, timeout=request_timeout)
+        try:
+            payload = resp.json()
+        finally:
+            resp.close()
+    except (requests.RequestException, ValueError) as e:
+        log_event("warning", "check_session_failed", component, error=str(e), **log_context)
+        return {"outcome": "error", "peers": 0, "speed": 0, "response_ms": _elapsed_ms()}
+
+    if payload.get("error"):
+        log_event("info", "check_session_rejected", component, error=payload["error"], **log_context)
+        return {"outcome": "dead", "peers": 0, "speed": 0, "response_ms": _elapsed_ms()}
+
+    response = payload.get("response") or {}
+    stat_url = response.get("stat_url")
+    command_url = response.get("command_url")
+    if not stat_url:
+        log_event("warning", "check_missing_stat_url", component,
+                  response_keys=list(response.keys()), **log_context)
+        return {"outcome": "error", "peers": 0, "speed": 0, "response_ms": _elapsed_ms()}
+
+    peers = 0
+    speed = 0
+    deadline = start + timeout
+    try:
+        while True:
+            stat = read_stat(stat_url, request_timeout=request_timeout,
+                             component=component, log_context=log_context)
+            status = stat.get("status") if stat else None
+            if stat:
+                peers = _as_int(stat.get("peers"))
+                speed = _as_int(stat.get("speed_down"))
+            if status in READY_STATUSES:
+                return {"outcome": "live", "peers": peers, "speed": speed, "response_ms": _elapsed_ms()}
+            if status in ERROR_STATUSES:
+                return {"outcome": "dead", "peers": peers, "speed": speed, "response_ms": _elapsed_ms()}
+            if time.monotonic() >= deadline:
+                return {"outcome": "timeout", "peers": peers, "speed": speed, "response_ms": _elapsed_ms()}
+            time.sleep(poll_interval)
+    finally:
+        stop_stream(command_url, request_timeout=request_timeout,
+                    component=component, log_context=log_context)
+
+
+def _as_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0

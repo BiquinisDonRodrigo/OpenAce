@@ -1,0 +1,14 @@
+# Zona horaria del contenedor
+TZ=Europe/Madrid
+
+# === VPN (solo docker-compose.yaml / docker-compose.dev.yaml con Gluetun) ===
+# Clave privada WireGuard (obténla de tu proveedor VPN, ej. ProtonVPN)
+WG_PRIVATE_KEY=your_wireguard_private_key_here
+# Países para la conexión VPN (separados por coma)
+ProtonCountries=switzerland,spain
+
+# === AceStream Engine ===
+# Host y puerto del engine. En despliegue estándar el host es 127.0.0.1.
+ACESTREAM_HOST=127.0.0.1
+ACESTREAM_PORT=6878
+

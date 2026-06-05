@@ -1,7 +1,7 @@
 services:
   acestream-vpn:
+    container_name: acestream-vpn-dev
     image: qmcgaw/gluetun:latest
-    container_name: acestream-vpn
     devices:
       - /dev/net/tun:/dev/net/tun
     cap_add:
@@ -26,7 +26,7 @@ services:
 
   kubo:
     image: ipfs/kubo:latest
-    container_name: kubo
+    container_name: kubo-dev
     environment:
       - IPFS_PROFILE=server
     healthcheck:
@@ -50,9 +50,16 @@ services:
     restart: unless-stopped
 
   open-ace:
-    image: ghcr.io/biquinisdonrodrigo/openace:latest
-    container_name: open-ace
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: open-ace-dev
     environment:
+      FLASK_APP: server.py
+      FLASK_DEBUG: "1"
+      PYTHONPATH: /openace
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
       TZ: ${TZ:-Europe/Madrid}
       ACESTREAM_HOST: "127.0.0.1"
       ACESTREAM_PORT: "6878"
@@ -67,10 +74,38 @@ services:
       kubo:
         condition: service_healthy
     volumes:
+      - ./app:/openace/app
+      - ./server.py:/openace/server.py
       - ./gluetun-data:/tmp/gluetun
       - ./logs:/var/log/openace
       - ./data:/openace/checkdb
     network_mode: service:acestream-vpn
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        FORWARDED_PORT_FILE="/tmp/gluetun/forwarded_port"
+        PORT=""
+        echo "[dev] Looking for Gluetun forwarded port..."
+        for i in {1..20}; do
+          if [[ -s "$$FORWARDED_PORT_FILE" ]]; then
+            PORT=$$(cat "$$FORWARDED_PORT_FILE")
+            echo "[dev] Got Gluetun port: $$PORT"
+            break
+          fi
+          echo "[dev] waiting for gluetun ($$i/20)"
+          sleep 1
+        done
+        if [[ -z "$$PORT" ]]; then
+          PORT=$${ACESTREAM_PORT:-6878}
+          echo "[dev] No forwarded port; fallback to $$PORT"
+        fi
+        echo "[dev] Starting AceStream engine on port $$PORT"
+        /openace/start-engine --client-console --port "$$PORT" >> /var/log/openace/acestream.log 2>&1 &
+        cd /openace
+        echo "[dev] Starting Flask dev server with reload on :8888"
+        exec python -m flask --app server:app run --host 0.0.0.0 --port 8888 --debug --reload
     restart: unless-stopped
 
 networks:

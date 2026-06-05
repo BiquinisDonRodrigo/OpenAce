@@ -1,40 +1,74 @@
-from flask import Blueprint, Response, current_app, request
-import requests
+import os
 import re
+import time
+
+from flask import Blueprint, Response, abort, send_from_directory
+
 from app.utils.logging_utils import log_event
 
-hls_bp = Blueprint('hls', __name__, url_prefix='/hls')
-COMPONENT = "hls_proxy"
+hls_bp = Blueprint('hls', __name__, url_prefix='/play/hls')
+COMPONENT = "hls_ffmpeg"
+MANIFEST_POLL_TIMEOUT_S = 30
+MANIFEST_POLL_INTERVAL_S = 0.5
+MANIFEST_FILENAME = "playlist.m3u8"
+SEGMENT_RE = re.compile(r'^[A-Za-z0-9_\-]+\.(?:ts|m3u8)$')
+_VALID_ID = re.compile(r'^[0-9a-fA-F]{40}$')
 
-@hls_bp.route('/<content_id>', defaults={'subpath': 'manifest.m3u8'})
-@hls_bp.route('/<content_id>/<path:subpath>')
-def hls_proxy(content_id, subpath):
-    host = current_app.config.get("ACESTREAM_HOST", "127.0.0.1")
-    port = current_app.config.get("ACESTREAM_PORT", "6878")
+_manager = None
 
-    try:
-        if subpath == "manifest.m3u8":
-            ace_url = f"http://{host}:{port}/ace/manifest.m3u8?id={content_id}"
-            r = requests.get(ace_url, timeout=5)
-            r.raise_for_status()
 
-            modified_content = re.sub(
-                r'([a-zA-Z0-9_\-]+\.m3u8)',
-                rf'/hls/{content_id}/\1',
-                r.text
-            )
+def set_manager(manager):
+    global _manager
+    _manager = manager
 
-            log_event("info", "hls_manifest_fetched", COMPONENT, content_id=content_id, source_url=ace_url, status="success")
-            return Response(modified_content, content_type='application/vnd.apple.mpegurl')
 
-        else:
-            ace_url = f"http://{host}:{port}/ace/{subpath}?id={content_id}"
-            r = requests.get(ace_url, stream=True, timeout=5)
-            r.raise_for_status()
+@hls_bp.route('/<content_id>')
+def hls_manifest(content_id):
+    if not _VALID_ID.match(content_id):
+        abort(400)
+    out_dir = _manager.ensure_stream(content_id)
+    if out_dir is None:
+        return Response("FFmpeg failed to start", status=503)
 
-            log_event("info", "hls_segment_fetched", COMPONENT, content_id=content_id, segment=subpath, source_url=ace_url, status="success")
-            return Response(r.iter_content(chunk_size=1024), content_type=r.headers.get('Content-Type'))
+    manifest_path = os.path.join(out_dir, MANIFEST_FILENAME)
+    deadline = time.monotonic() + MANIFEST_POLL_TIMEOUT_S
+    while not os.path.exists(manifest_path):
+        if not _manager.is_alive(content_id):
+            log_event("warning", "hls_ffmpeg_exited", COMPONENT, content_id=content_id)
+            _manager.drop(content_id)
+            return Response("Upstream not ready", status=503)
+        if time.monotonic() >= deadline:
+            log_event("warning", "hls_manifest_timeout", COMPONENT, content_id=content_id)
+            return Response("Stream buffering, retry", status=503)
+        time.sleep(MANIFEST_POLL_INTERVAL_S)
 
-    except requests.exceptions.RequestException as e:
-        log_event("error", "hls_proxy_error", COMPONENT, content_id=content_id, subpath=subpath, error=str(e), status="connection_failed")
-        return Response("Failed to connect to AceStream engine", status=503)
+    with open(manifest_path, "r", errors="replace") as fh:
+        raw = fh.read()
+
+    rewritten = _rewrite_manifest(raw, content_id)
+    log_event("info", "hls_manifest_served", COMPONENT, content_id=content_id)
+    return Response(rewritten, content_type="application/vnd.apple.mpegurl")
+
+
+@hls_bp.route('/<content_id>/<filename>')
+def hls_segment(content_id, filename):
+    if not _VALID_ID.match(content_id):
+        abort(400)
+    if not SEGMENT_RE.match(filename):
+        abort(400)
+    out_dir = _manager.output_dir(content_id)
+    if not os.path.exists(os.path.join(out_dir, filename)):
+        abort(404)
+    _manager.touch(content_id)
+    return send_from_directory(out_dir, filename)
+
+
+def _rewrite_manifest(body: str, content_id: str) -> str:
+    out = []
+    for line in body.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and not stripped.startswith("http"):
+            basename = os.path.basename(stripped)
+            line = f"/play/hls/{content_id}/{basename}\n"
+        out.append(line)
+    return "".join(out)

@@ -1,32 +1,7 @@
 services:
-  acestream-vpn:
-    image: qmcgaw/gluetun:latest
-    container_name: acestream-vpn
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - NET_ADMIN
-    environment:
-      - VPN_SERVICE_PROVIDER=protonvpn
-      - VPN_TYPE=wireguard
-      - WIREGUARD_PRIVATE_KEY=${WG_PRIVATE_KEY}
-      - VPN_PORT_FORWARDING=on
-      - SERVER_COUNTRIES=${ProtonCountries}
-      - HTTP_CONTROL_SERVER_ADDRESS=:8001
-      - HEALTH_TARGET_ADDRESSES=cloudflare.com:80
-      - TZ=${TZ:-Europe/Madrid}
-    volumes:
-      - ./gluetun-data:/tmp/gluetun
-    ports:
-      - "8888:8888"
-      - "8001:8001"
-    networks:
-      - acestream-net
-    restart: unless-stopped
-
   kubo:
     image: ipfs/kubo:latest
-    container_name: kubo
+    container_name: kubo-dev
     environment:
       - IPFS_PROFILE=server
     healthcheck:
@@ -50,28 +25,44 @@ services:
     restart: unless-stopped
 
   open-ace:
-    image: ghcr.io/biquinisdonrodrigo/openace:latest
-    container_name: open-ace
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: open-ace-dev
     environment:
+      FLASK_APP: server.py
+      FLASK_DEBUG: "1"
+      PYTHONPATH: /openace
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
       TZ: ${TZ:-Europe/Madrid}
       ACESTREAM_HOST: "127.0.0.1"
       ACESTREAM_PORT: "6878"
       IPFS_GATEWAY: "http://kubo:48080"
       DB_PATH: /openace/checkdb/data.db
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
     depends_on:
-      acestream-vpn:
-        condition: service_started
       kubo:
         condition: service_healthy
     volumes:
-      - ./gluetun-data:/tmp/gluetun
+      - ./app:/openace/app
+      - ./server.py:/openace/server.py
       - ./logs:/var/log/openace
       - ./data:/openace/checkdb
-    network_mode: service:acestream-vpn
-    restart: unless-stopped
+    ports:
+      - "8888:8888"
+      - "6878:6878"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        echo "[dev] Starting AceStream engine on port 6878"
+        /openace/start-engine --client-console --port 6878 >> /var/log/openace/acestream.log 2>&1 &
+        cd /openace
+        echo "[dev] Starting Flask dev server with reload on :8888"
+        exec python -m flask --app server:app run --host 0.0.0.0 --port 8888 --debug --reload
+    networks:
+      - acestream-net
 
 networks:
   acestream-net:

@@ -1,51 +1,83 @@
+import re
 import time
-import requests
+
 from flask import Blueprint, Response, current_app
+
+from app.utils.acestream import negotiate_stream, stop_stream
 from app.utils.logging_utils import log_event
+from app.utils.stream_registry import register, unregister
+from app.utils.upstream import open_upstream, stream_to_client
 
 play_bp = Blueprint('play', __name__, url_prefix='/play')
 COMPONENT = "play_proxy"
+_VALID_ID = re.compile(r'^[0-9a-fA-F]{40}$')
 
-@play_bp.route('/<content_id>')
+
+@play_bp.route('/mpegts/<content_id>')
 def play(content_id):
-    start_url = f"{current_app.config['ACESTREAM_ENGINE']}/ace/getstream?content_id={content_id}"
-    log_event("info", "stream_request_started", COMPONENT, content_id=content_id, source_url=start_url)
+    if not _VALID_ID.match(content_id):
+        return Response("Invalid content id", status=400)
+    log_context = {"content_id": content_id}
+    log_event("info", "stream_request_started", COMPONENT, **log_context)
 
-    for i in range(10):
-        try:
-            r = requests.get(start_url, stream=True, timeout=(5, 60))
-            if r.status_code == 200:
-                log_event("info", "stream_available", COMPONENT, content_id=content_id, attempt=i+1, status_code=r.status_code)
+    session_info = negotiate_stream(
+        current_app.config['ACESTREAM_ENGINE'],
+        content_id,
+        component=COMPONENT,
+        log_context=log_context,
+    )
+    if session_info is None:
+        return Response("Stream not available", status=503)
 
-                def generate():
-                    total_bytes = 0
-                    last_log_time = time.time()
-                    try:
-                        for chunk in r.iter_content(chunk_size=8192):
-                            if not chunk:
-                                continue
-                            yield chunk
-                            total_bytes += len(chunk)
-                            now = time.time()
+    command_url = session_info["command_url"]
+    r = open_upstream(
+        session_info["playback_url"],
+        retries=10,
+        backoff=0.5,
+        connect_timeout=5,
+        read_timeout=60,
+        retriable_statuses=(502, 503, 504),
+        component=COMPONENT,
+        log_context=log_context,
+    )
+    if r is None:
+        stop_stream(command_url, component=COMPONENT, log_context=log_context)
+        return Response("Stream not available", status=503)
+    if r.status_code != 200:
+        log_event("warning", "stream_unexpected_status", COMPONENT,
+                  status_code=r.status_code, **log_context)
+        status = r.status_code
+        r.close()
+        stop_stream(command_url, component=COMPONENT, log_context=log_context)
+        return Response("Upstream error", status=status)
 
-                            if total_bytes >= 5 * 1024 * 1024 or (now - last_log_time) > 60:
-                                mb = round(total_bytes / (1024 * 1024), 2)
-                                log_event("info", "stream_progress", COMPONENT, content_id=content_id, bytes_transmitted_mb=mb)
-                                total_bytes = 0
-                                last_log_time = now
-                    except requests.exceptions.ReadTimeout:
-                        log_event("error", "stream_read_timeout", COMPONENT, content_id=content_id, error="Read timeout from AceStream")
-                    except Exception as e:
-                        log_event("error", "stream_transmission_error", COMPONENT, content_id=content_id, error=str(e))
-                    finally:
-                        log_event("info", "stream_transmission_ended", COMPONENT, content_id=content_id)
+    log_event("info", "stream_available", COMPONENT, status_code=r.status_code, **log_context)
+    register(content_id, "mpegts")
 
-                return Response(generate(), content_type='video/mp2t')
-            else:
-                log_event("warning", "stream_unexpected_status", COMPONENT, content_id=content_id, attempt=i+1, status_code=r.status_code)
-        except Exception as e:
-            log_event("warning", "stream_attempt_failed", COMPONENT, content_id=content_id, attempt=i+1, error=str(e))
-        time.sleep(1.5)
+    state = {"total": 0, "last_log": time.time()}
 
-    log_event("error", "stream_unavailable", COMPONENT, content_id=content_id, attempts=10)
-    return "Stream not available", 503
+    def on_chunk(n):
+        state["total"] += n
+        now = time.time()
+        if state["total"] >= 5 * 1024 * 1024 or (now - state["last_log"]) > 60:
+            mb = round(state["total"] / (1024 * 1024), 2)
+            log_event("info", "stream_progress", COMPONENT,
+                      bytes_transmitted_mb=mb, **log_context)
+            state["total"] = 0
+            state["last_log"] = now
+
+    def on_close():
+        unregister(content_id, "mpegts")
+        stop_stream(command_url, component=COMPONENT, log_context=log_context)
+
+    return Response(
+        stream_to_client(
+            r,
+            chunk_size=8192,
+            on_chunk=on_chunk,
+            on_close=on_close,
+            component=COMPONENT,
+            log_context=log_context,
+        ),
+        content_type='video/mp2t',
+    )

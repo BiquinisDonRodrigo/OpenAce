@@ -30,13 +30,7 @@ def create_app():
         if any(path.startswith(p) for p in _EULA_EXEMPT_PREFIXES):
             return None
         from app.utils import eula_store
-        ip = (
-            request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-            or request.headers.get("X-Real-IP")
-            or request.remote_addr
-        )
-        st = eula_store.status(ip)
-        if not st.get("accepted"):
+        if not eula_store.is_globally_accepted():
             from urllib.parse import quote
             safe_path = quote(request.full_path, safe='')
             return redirect(f"/eula?redirect={safe_path}")

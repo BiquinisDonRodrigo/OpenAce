@@ -60,7 +60,8 @@ def eula_revoke():
 def eula_status():
     try:
         ip = _client_ip()
-        return jsonify(eula_store.status(ip))
+        st = eula_store.status(ip)
+        return jsonify(st)
     except Exception as e:
         log_event("error", "eula_status_failed", COMPONENT, error=str(e))
         return jsonify({"accepted": False, "error": "Error interno."}), 500

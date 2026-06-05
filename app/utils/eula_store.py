@@ -49,19 +49,26 @@ def revoke(ip: str) -> bool:
                 """
                 UPDATE eula_consents
                 SET revoked_at = ?, revoked_ip = ?
-                WHERE id = (
-                    SELECT id FROM eula_consents
-                    WHERE ip = ? AND revoked_at IS NULL
-                    ORDER BY accepted_at DESC
-                    LIMIT 1
-                )
+                WHERE revoked_at IS NULL
                 """,
-                (now, ip, ip),
+                (now, ip),
             )
             conn.commit()
             return cur.rowcount > 0
         finally:
             conn.close()
+
+
+def is_globally_accepted() -> bool:
+    _ensure_init()
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM eula_consents WHERE revoked_at IS NULL LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    return row is not None
 
 
 def status(ip: str) -> dict:
@@ -70,13 +77,12 @@ def status(ip: str) -> dict:
     try:
         row = conn.execute(
             """
-            SELECT id, accepted_at, eula_version
+            SELECT id, accepted_at, eula_version, ip
             FROM eula_consents
-            WHERE ip = ? AND revoked_at IS NULL
+            WHERE revoked_at IS NULL
             ORDER BY accepted_at DESC
             LIMIT 1
             """,
-            (ip,),
         ).fetchone()
     finally:
         conn.close()
@@ -86,5 +92,6 @@ def status(ip: str) -> dict:
             "consent_id": row[0],
             "accepted_at": row[1],
             "version": row[2],
+            "accepted_from": row[3],
         }
     return {"accepted": False}

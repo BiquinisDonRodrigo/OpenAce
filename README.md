@@ -322,7 +322,7 @@ Si la `source_url` contiene una ruta `/ipfs/` o `/ipns/`, se reescribe automáti
 
 ## EULA / Consent gate
 
-Un middleware intercepta todas las peticiones y redirige a `/eula` si el usuario (identificado por IP) no ha aceptado el acuerdo.
+Un middleware intercepta todas las peticiones y redirige a `/eula` si nadie ha aceptado el acuerdo todavía. La aceptación es **global**: basta con aceptar una sola vez desde cualquier dispositivo para que todos los clientes (reproductores IPTV, navegadores, etc.) accedan sin restricción.
 
 - El usuario debe escribir la frase literal **"He leído y acepto el acuerdo"**.
 - Se almacena un hash SHA-256 de la frase (nunca el texto plano), la IP, el User-Agent y la marca temporal.

@@ -173,4 +173,5 @@ Flask se ejecuta con `--debug --reload`, los directorios `app/` y `server.py` se
 
 - [Configuracion inicial](04-configuracion-inicial.md)
 - [Despliegue en VPS](03-despliegue-vps.md) para SSL y acceso desde internet
+- [Securizacion de la VPS](07-securizacion-vps.md) para proteger el servidor
 - [Modulos](05-modulos.md) para entender cada seccion de la interfaz

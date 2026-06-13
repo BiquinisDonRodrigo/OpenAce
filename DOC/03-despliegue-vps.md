@@ -159,19 +159,9 @@ proxy_pass http://acestream-vpn:8888;
 
 Esto aplica a las 4 directivas `proxy_pass` del fichero.
 
-## Firewall recomendado
+## Firewall y securizacion
 
-```bash
-# UFW
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
-sudo ufw allow 4001/tcp   # IPFS (necesario para P2P)
-sudo ufw allow 4001/udp
-sudo ufw deny 8888/tcp    # Bloquear acceso directo al proxy
-sudo ufw enable
-```
-
-Es importante bloquear el puerto 8888 desde el exterior para que todo el trafico pase por nginx (con SSL y rate limiting).
+Consulta la guia completa en [Securizacion de la VPS](07-securizacion-vps.md). Como minimo, configura iptables y vincula los puertos Docker a localhost para que el trafico pase siempre por nginx.
 
 ## Verificar el despliegue
 
@@ -191,6 +181,7 @@ curl -s -o /dev/null -w "%{http_code}" https://tu-dominio.com/
 
 ## Siguientes pasos
 
+- [Securizacion de la VPS](07-securizacion-vps.md) para proteger el servidor
 - [Configuracion inicial](04-configuracion-inicial.md) para completar el asistente
 - [Modulos](05-modulos.md) para entender la interfaz
 - [Reproductores](06-reproductores.md) para configurar los clientes

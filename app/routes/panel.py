@@ -492,6 +492,7 @@ function render(data) {
           <th>Content ID</th>
           <th>Formato</th>
           <th>Clientes</th>
+          <th>IPs conectadas</th>
           <th>Tiempo</th>
         </tr></thead>
         <tbody>${streams.map(s => `
@@ -500,6 +501,7 @@ function render(data) {
             <td class="mono" style="font-size:11px;word-break:break-all;white-space:normal">${esc(s.content_id)}</td>
             <td>${badge(s.format.toUpperCase(), s.format === 'hls' ? 'blue' : 'green')}</td>
             <td>${s.clients}</td>
+            <td class="mono" style="font-size:11px">${(s.client_ips||[]).map(ip => esc(ip)).join('<br>') || '—'}</td>
             <td class="mono">${fmt_secs(Math.floor(Date.now()/1000 - s.started_at))}</td>
           </tr>`).join('')}
         </tbody>

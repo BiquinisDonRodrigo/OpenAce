@@ -82,3 +82,4 @@ docker compose down
 - [Despliegue paso a paso](02-despliegue-paso-a-paso.md) para entender cada componente
 - [Configuracion inicial](04-configuracion-inicial.md) para el asistente de setup
 - [Despliegue en VPS](03-despliegue-vps.md) para exponer el servicio a internet con SSL
+- [Securizacion de la VPS](07-securizacion-vps.md) para proteger el servidor

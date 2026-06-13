@@ -390,7 +390,7 @@ tr:last-child td{border-bottom:none}
     <form id="pform" onsubmit="handleSubmit(event)">
       <div class="form-group">
         <label>Nombre</label>
-        <input id="f-display" required placeholder="Ej: Elcano, New Era..." />
+        <input id="f-display" required placeholder="Nombre del plugin" />
       </div>
       <div class="form-group">
         <label>URL de la lista M3U</label>

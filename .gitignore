@@ -1,7 +1,42 @@
----
-```gitignore
+# Python
 __pycache__/
 *.pyc
-*.log
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# Entorno y secretos
 .env
+.env.*
+!env-example
+
+# Logs
+*.log
+logs/
+
+# Docker / runtime
 gluetun-data/
+data/
+ipfs/data/
+
+# Claude Code
+CLAUDE.md
+.claude/
+
+# Documentacion
+doc/
+
+# Prompts internos
+prompt-a-mejorar/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store

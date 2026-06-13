@@ -13,11 +13,7 @@ def eula_page():
 
 
 def _client_ip():
-    return (
-        request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        or request.headers.get("X-Real-IP")
-        or request.remote_addr
-    )
+    return request.remote_addr
 
 
 @eula_bp.route("/api/eula/accept", methods=["POST"])

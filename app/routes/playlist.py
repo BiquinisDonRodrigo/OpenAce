@@ -7,8 +7,9 @@ playlist_bp = Blueprint('playlist', __name__)
 COMPONENT = "playlist_proxy"
 
 
-def _render_m3u(channels, base_url, fmt):
+def _render_m3u(channels, base_url, fmt, token=None):
     lines = ['#EXTM3U', '']
+    suffix = f"?token={token}" if token else ""
     for ch in sorted(channels, key=lambda c: c.get("name", "").lower()):
         name = ch.get("name", "Unknown")
         group = ch.get("group_title", "")
@@ -17,9 +18,9 @@ def _render_m3u(channels, base_url, fmt):
         infohash = ch["infohash"]
 
         if fmt == 'mpegts':
-            url = f"{base_url}/play/mpegts/{infohash}"
+            url = f"{base_url}/play/mpegts/{infohash}{suffix}"
         else:
-            url = f"{base_url}/play/hls/{infohash}"
+            url = f"{base_url}/play/hls/{infohash}{suffix}"
 
         lines.append(f'#EXTINF:-1 group-title="{group}" tvg-name="{name}" tvg-id="{tvg_id}" tvg-logo="{logo}",{name}')
         lines.append(f'#EXTGRP:{group}')
@@ -38,7 +39,8 @@ def _render(plugin_name, fmt):
         return Response("Playlist not ready, retry in a moment.\n", status=503, mimetype='text/plain')
 
     base_url = request.host_url.rstrip('/')
-    body = _render_m3u(channels, base_url, fmt)
+    token = request.args.get("token")
+    body = _render_m3u(channels, base_url, fmt, token=token)
     log_event("info", "playlist_served", COMPONENT, plugin=plugin_name, format=fmt, channels=len(channels))
     return Response(body, content_type='audio/mpegurl; charset=utf-8')
 

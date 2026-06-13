@@ -725,12 +725,19 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .shortcut.eula:hover { border-color: var(--blue); box-shadow: 0 0 20px rgba(88,166,255,.15); }
   .shortcut.plugins { border-top: 3px solid var(--purple); }
   .shortcut.plugins:hover { border-color: var(--purple); box-shadow: 0 0 20px rgba(188,140,255,.15); }
+  .shortcut.admin { border-top: 3px solid var(--text); }
+  .shortcut.admin:hover { border-color: var(--text); box-shadow: 0 0 20px rgba(230,237,243,.1); }
+  .user-info { margin-left: auto; display: flex; align-items: center; gap: 12px; font-size: 13px; }
+  .user-info .username { color: var(--muted); }
+  .user-info a { color: var(--muted); text-decoration: none; font-size: 12px; border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; }
+  .user-info a:hover { border-color: var(--blue); color: var(--blue); }
 </style>
 </head>
 <body>
 <header>
   <h1>OpenAce</h1>
   <span class="subtitle">Dashboard</span>
+  <div class="user-info" id="user-info"></div>
 </header>
 <div class="dashboard">
   <div class="cards">
@@ -754,8 +761,25 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="label">Plugins</div>
       <div class="desc">Gestionar fuentes M3U, crear y editar plugins dinámicos</div>
     </a>
+    <a class="shortcut admin" href="/admin/users" id="card-admin" style="display:none">
+      <div class="icon">&#128100;</div>
+      <div class="label">Usuarios</div>
+      <div class="desc">Gestión de usuarios, roles y tokens API</div>
+    </a>
   </div>
 </div>
+<script>
+(async()=>{
+  try{
+    const r=await fetch('/api/auth/me');const d=await r.json();
+    if(d.authenticated){
+      document.getElementById('user-info').innerHTML=
+        '<span class="username">'+d.user.username+'</span><a href="/logout">Cerrar sesión</a>';
+      if(d.user.role==='admin')document.getElementById('card-admin').style.display='';
+    }
+  }catch(e){}
+})();
+</script>
 </body>
 </html>"""
 

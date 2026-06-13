@@ -31,4 +31,11 @@ echo "Starting AceStream on port $PORT..."
 export PYTHONPATH=/openace
 
 # Start proxy in the foreground
-exec gunicorn --chdir /openace --worker-class gevent --bind 0.0.0.0:8888 --timeout 3600 server:app
+GUNICORN_ARGS="--chdir /openace --worker-class gevent --bind 0.0.0.0:8888 --timeout 3600"
+
+if [[ "${REVERSE_PROXY,,}" =~ ^(true|1|yes)$ ]]; then
+  GUNICORN_ARGS="$GUNICORN_ARGS --forwarded-allow-ips=*"
+  echo "Reverse proxy mode enabled — trusting forwarded headers"
+fi
+
+exec gunicorn $GUNICORN_ARGS server:app

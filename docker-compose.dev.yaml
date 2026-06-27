@@ -1,0 +1,134 @@
+services:
+  acestream-vpn:
+    container_name: acestream-vpn-dev
+    image: qmcgaw/gluetun:latest
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - VPN_SERVICE_PROVIDER=protonvpn
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${WG_PRIVATE_KEY}
+      - VPN_PORT_FORWARDING=on
+      - SERVER_COUNTRIES=${ProtonCountries}
+      - HTTP_CONTROL_SERVER_ADDRESS=:8001
+      - HEALTH_TARGET_ADDRESSES=cloudflare.com:80
+      - TZ=${TZ:-Europe/Madrid}
+    volumes:
+      - ./gluetun-data:/tmp/gluetun
+    ports:
+      - "8888:8888"
+      - "8001:8001"
+    networks:
+      - acestream-net
+    restart: unless-stopped
+
+  kubo:
+    image: ipfs/kubo:latest
+    container_name: kubo-dev
+    environment:
+      - IPFS_PROFILE=server
+    volumes:
+      - ./ipfs/export:/export
+      - ./ipfs/data:/data/ipfs
+      - ./ipfs/container-init.d/001-gateway-port.sh:/container-init.d/001-gateway-port.sh:ro
+    ports:
+      - "4001:4001/tcp"
+      - "4001:4001/udp"
+      - "127.0.0.1:5001:5001"
+    expose:
+      - "48080"
+    networks:
+      - acestream-net
+    restart: unless-stopped
+
+  open-ace:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: open-ace-dev
+    init: true
+    environment:
+      FLASK_APP: server.py
+      FLASK_DEBUG: "1"
+      PYTHONPATH: /openace
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      TZ: ${TZ:-Europe/Madrid}
+      ACESTREAM_HOST: "127.0.0.1"
+      ACESTREAM_PORT: "6878"
+      ACESTREAM_IP: ${ACESTREAM_IP:-}
+      IPFS_GATEWAY: "http://kubo:48080"
+      DB_PATH: /openace/checkdb/data.db
+      AUTH_ENABLED: ${AUTH_ENABLED:-true}
+      OPENACE_SECRET_KEY: ${OPENACE_SECRET_KEY:-}
+      SESSION_DURATION_HOURS: ${SESSION_DURATION_HOURS:-24}
+      REVERSE_PROXY: ${REVERSE_PROXY:-false}
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      OPENACE_IDLE_TIMEOUT_S: ${OPENACE_IDLE_TIMEOUT_S:-180}
+      OPENACE_CHUNK_SIZE: ${OPENACE_CHUNK_SIZE:-65536}
+      OPENACE_QUEUE_MAX: ${OPENACE_QUEUE_MAX:-256}
+      OPENACE_PIPE_BUFFER_SIZE: ${OPENACE_PIPE_BUFFER_SIZE:-1048576}
+      OPENACE_MAX_STREAMS: ${OPENACE_MAX_STREAMS:-32}
+      OPENACE_ITERATE_TIMEOUT_S: ${OPENACE_ITERATE_TIMEOUT_S:-180}
+      OPENACE_FFMPEG_RW_TIMEOUT_US: ${OPENACE_FFMPEG_RW_TIMEOUT_US:-120000000}
+      OPENACE_FFMPEG_RESTARTS: ${OPENACE_FFMPEG_RESTARTS:-3}
+      OPENACE_FFMPEG_RESTART_BACKOFF_S: ${OPENACE_FFMPEG_RESTART_BACKOFF_S:-2}
+      OPENACE_HLS_STALE_SEGMENT_MAX_AGE_S: ${OPENACE_HLS_STALE_SEGMENT_MAX_AGE_S:-30}
+      OPENACE_HLS_TIME: ${OPENACE_HLS_TIME:-4}
+      OPENACE_HLS_LIST_SIZE: ${OPENACE_HLS_LIST_SIZE:-15}
+      OPENACE_HLS_TIME_LIVE: ${OPENACE_HLS_TIME_LIVE:-2}
+      OPENACE_HLS_LIST_SIZE_LIVE: ${OPENACE_HLS_LIST_SIZE_LIVE:-6}
+      OPENACE_FFMPEG_RTBUFSIZE: ${OPENACE_FFMPEG_RTBUFSIZE:-5M}
+      OPENACE_STAT_POLL_READY_S: ${OPENACE_STAT_POLL_READY_S:-2.0}
+      OPENACE_ZERO_PEER_DEAD_POLLS: ${OPENACE_ZERO_PEER_DEAD_POLLS:-10}
+      OPENACE_HTTP_POOL_CONNECTIONS: ${OPENACE_HTTP_POOL_CONNECTIONS:-64}
+      OPENACE_HTTP_POOL_MAXSIZE: ${OPENACE_HTTP_POOL_MAXSIZE:-128}
+      OPENACE_AUTO_SETUP: ${OPENACE_AUTO_SETUP:-false}
+      OPENACE_ADMIN_USER: ${OPENACE_ADMIN_USER:-admin}
+      OPENACE_ADMIN_PASSWORD: ${OPENACE_ADMIN_PASSWORD:-}
+      OPENACE_EULA_ACCEPT: ${OPENACE_EULA_ACCEPT:-false}
+    depends_on:
+      - acestream-vpn
+      - kubo
+    volumes:
+      - ./app:/openace/app
+      - ./server.py:/openace/server.py
+      - ./gluetun-data:/tmp/gluetun
+      - ./data:/openace/checkdb
+    network_mode: service:acestream-vpn
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        chown -R openace:openace /openace/checkdb /tmp/openace 2>/dev/null || true
+        FORWARDED_PORT_FILE="/tmp/gluetun/forwarded_port"
+        PORT=""
+        echo "[dev] Looking for Gluetun forwarded port..."
+        for i in {1..20}; do
+          if [[ -s "$$FORWARDED_PORT_FILE" ]]; then
+            PORT=$$(cat "$$FORWARDED_PORT_FILE")
+            echo "[dev] Got Gluetun port: $$PORT"
+            break
+          fi
+          echo "[dev] waiting for gluetun ($$i/20)"
+          sleep 1
+        done
+        if [[ -z "$$PORT" ]]; then
+          PORT=$${ACESTREAM_PORT:-6878}
+          echo "[dev] No forwarded port; fallback to $$PORT"
+        fi
+        echo "[dev] Starting AceStream engine on port $$PORT"
+        gosu openace /openace/start-engine --client-console --port "$$PORT" 2>&1 &
+        cd /openace
+        gosu openace python -m babel.messages.frontend compile -d app/translations -D messages || true
+        echo "[dev] Starting Flask dev server with reload on :8888"
+        exec gosu openace python -m flask --app server:app run --host 0.0.0.0 --port 8888 --debug --reload
+    restart: unless-stopped
+
+networks:
+  acestream-net:
+    name: acestream-net

@@ -1,0 +1,77 @@
+# English translations for OpenAce.
+# Copyright (C) 2026 OpenAce
+# This file is distributed under the MIT license.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: OpenAce 1.0\n"
+"Report-Msgid-Bugs-To: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: en\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#. Skip-link text
+msgid "nav.skip_to_content"
+msgstr "Skip to content"
+
+#. Nav landmark label
+msgid "nav.primary"
+msgstr "Primary"
+
+#. Nav items
+msgid "nav.dashboard"
+msgstr "Dashboard"
+msgid "nav.peers"
+msgstr "Peers"
+msgid "nav.plugins"
+msgstr "Plugins"
+msgid "nav.checker"
+msgstr "Checker"
+msgid "nav.users"
+msgstr "Users"
+msgid "nav.eula"
+msgstr "Agreement"
+msgid "nav.logout"
+msgstr "Log out"
+
+#. Header controls
+msgid "nav.theme_toggle"
+msgstr "Toggle theme"
+msgid "nav.language"
+msgstr "Language"
+
+#. Roles
+msgid "role.admin"
+msgstr "admin"
+msgid "role.user"
+msgstr "user"
+msgid "role.viewer"
+msgstr "viewer"
+
+#. Common strings
+msgid "common.loading"
+msgstr "Loading…"
+msgid "common.error"
+msgstr "Error"
+msgid "common.retry"
+msgstr "Retry"
+msgid "common.cancel"
+msgstr "Cancel"
+msgid "common.save"
+msgstr "Save"
+msgid "common.delete"
+msgstr "Delete"
+msgid "common.edit"
+msgstr "Edit"
+msgid "common.close"
+msgstr "Close"
+msgid "common.confirm"
+msgstr "Confirm"
+msgid "common.empty"
+msgstr "No data"
+msgid "common.copied"
+msgstr "Copied"
+msgid "common.copy"
+msgstr "Copy"

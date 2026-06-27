@@ -1,0 +1,77 @@
+# Spanish translations for OpenAce.
+# Copyright (C) 2026 OpenAce
+# This file is distributed under the MIT license.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: OpenAce 1.0\n"
+"Report-Msgid-Bugs-To: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: es\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#. Skip-link text
+msgid "nav.skip_to_content"
+msgstr "Saltar al contenido"
+
+#. Nav landmark label
+msgid "nav.primary"
+msgstr "Principal"
+
+#. Nav items
+msgid "nav.dashboard"
+msgstr "Panel"
+msgid "nav.peers"
+msgstr "Peers"
+msgid "nav.plugins"
+msgstr "Plugins"
+msgid "nav.checker"
+msgstr "Comprobador"
+msgid "nav.users"
+msgstr "Usuarios"
+msgid "nav.eula"
+msgstr "Acuerdo"
+msgid "nav.logout"
+msgstr "Cerrar sesión"
+
+#. Header controls
+msgid "nav.theme_toggle"
+msgstr "Cambiar tema"
+msgid "nav.language"
+msgstr "Idioma"
+
+#. Roles
+msgid "role.admin"
+msgstr "administrador"
+msgid "role.user"
+msgstr "usuario"
+msgid "role.viewer"
+msgstr "espectador"
+
+#. Common strings
+msgid "common.loading"
+msgstr "Cargando…"
+msgid "common.error"
+msgstr "Error"
+msgid "common.retry"
+msgstr "Reintentar"
+msgid "common.cancel"
+msgstr "Cancelar"
+msgid "common.save"
+msgstr "Guardar"
+msgid "common.delete"
+msgstr "Eliminar"
+msgid "common.edit"
+msgstr "Editar"
+msgid "common.close"
+msgstr "Cerrar"
+msgid "common.confirm"
+msgstr "Confirmar"
+msgid "common.empty"
+msgstr "No hay datos"
+msgid "common.copied"
+msgstr "Copiado"
+msgid "common.copy"
+msgstr "Copiar"

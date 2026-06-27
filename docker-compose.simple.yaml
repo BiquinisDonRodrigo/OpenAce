@@ -1,0 +1,75 @@
+services:
+  kubo:
+    image: ipfs/kubo:latest
+    container_name: kubo
+    environment:
+      - IPFS_PROFILE=server
+    volumes:
+      - ./ipfs/export:/export
+      - ./ipfs/data:/data/ipfs
+      - ./ipfs/container-init.d/001-gateway-port.sh:/container-init.d/001-gateway-port.sh:ro
+    ports:
+      - "4001:4001/tcp"
+      - "4001:4001/udp"
+      - "127.0.0.1:5001:5001"
+    expose:
+      - "48080"
+    networks:
+      - acestream-net
+    restart: unless-stopped
+
+  open-ace:
+    image: ghcr.io/biquinisdonrodrigo/openace:latest
+    container_name: open-ace
+    init: true
+    environment:
+      TZ: ${TZ:-Europe/Madrid}
+      ACESTREAM_HOST: "127.0.0.1"
+      ACESTREAM_PORT: "6878"
+      ACESTREAM_IP: ${ACESTREAM_IP:-}
+      IPFS_GATEWAY: "http://kubo:48080"
+      DB_PATH: /openace/checkdb/data.db
+      AUTH_ENABLED: ${AUTH_ENABLED:-true}
+      OPENACE_SECRET_KEY: ${OPENACE_SECRET_KEY:-}
+      SESSION_DURATION_HOURS: ${SESSION_DURATION_HOURS:-24}
+      REVERSE_PROXY: ${REVERSE_PROXY:-false}
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      OPENACE_IDLE_TIMEOUT_S: ${OPENACE_IDLE_TIMEOUT_S:-180}
+      OPENACE_CHUNK_SIZE: ${OPENACE_CHUNK_SIZE:-65536}
+      OPENACE_QUEUE_MAX: ${OPENACE_QUEUE_MAX:-256}
+      OPENACE_PIPE_BUFFER_SIZE: ${OPENACE_PIPE_BUFFER_SIZE:-1048576}
+      OPENACE_MAX_STREAMS: ${OPENACE_MAX_STREAMS:-32}
+      OPENACE_ITERATE_TIMEOUT_S: ${OPENACE_ITERATE_TIMEOUT_S:-180}
+      OPENACE_FFMPEG_RW_TIMEOUT_US: ${OPENACE_FFMPEG_RW_TIMEOUT_US:-120000000}
+      OPENACE_FFMPEG_RESTARTS: ${OPENACE_FFMPEG_RESTARTS:-3}
+      OPENACE_FFMPEG_RESTART_BACKOFF_S: ${OPENACE_FFMPEG_RESTART_BACKOFF_S:-2}
+      OPENACE_HLS_STALE_SEGMENT_MAX_AGE_S: ${OPENACE_HLS_STALE_SEGMENT_MAX_AGE_S:-30}
+      OPENACE_HLS_TIME: ${OPENACE_HLS_TIME:-4}
+      OPENACE_HLS_LIST_SIZE: ${OPENACE_HLS_LIST_SIZE:-15}
+      OPENACE_HLS_TIME_LIVE: ${OPENACE_HLS_TIME_LIVE:-2}
+      OPENACE_HLS_LIST_SIZE_LIVE: ${OPENACE_HLS_LIST_SIZE_LIVE:-6}
+      OPENACE_FFMPEG_RTBUFSIZE: ${OPENACE_FFMPEG_RTBUFSIZE:-5M}
+      OPENACE_STAT_POLL_READY_S: ${OPENACE_STAT_POLL_READY_S:-2.0}
+      OPENACE_ZERO_PEER_DEAD_POLLS: ${OPENACE_ZERO_PEER_DEAD_POLLS:-10}
+      OPENACE_HTTP_POOL_CONNECTIONS: ${OPENACE_HTTP_POOL_CONNECTIONS:-64}
+      OPENACE_HTTP_POOL_MAXSIZE: ${OPENACE_HTTP_POOL_MAXSIZE:-128}
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-1}
+      GUNICORN_WORKER_CONNECTIONS: ${GUNICORN_WORKER_CONNECTIONS:-2000}
+      OPENACE_AUTO_SETUP: ${OPENACE_AUTO_SETUP:-false}
+      OPENACE_ADMIN_USER: ${OPENACE_ADMIN_USER:-admin}
+      OPENACE_ADMIN_PASSWORD: ${OPENACE_ADMIN_PASSWORD:-}
+      OPENACE_EULA_ACCEPT: ${OPENACE_EULA_ACCEPT:-false}
+    depends_on:
+      - kubo
+    volumes:
+      - ./data:/openace/checkdb
+    ports:
+      - "8888:8888"
+    networks:
+      - acestream-net
+    restart: unless-stopped
+
+networks:
+  acestream-net:
+    name: acestream-net

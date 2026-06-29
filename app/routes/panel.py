@@ -1059,6 +1059,11 @@ _DASHBOARD_BODY = """
       <span class="label">Plugins</span>
       <span class="desc">Gestionar fuentes M3U, crear y editar plugins dinámicos</span>
     </a>
+    <a class="shortcut environment" href="/environment" id="card-environment" hidden>
+      <span class="icon" aria-hidden="true">\U0001F527</span>
+      <span class="label">Environment</span>
+      <span class="desc">Configurar parámetros de OpenAce sin tocar el .env</span>
+    </a>
     <a class="shortcut admin" href="/admin/users" id="card-admin" hidden>
       <span class="icon" aria-hidden="true">\U0001F464</span>
       <span class="label">Usuarios</span>
@@ -1089,6 +1094,7 @@ _DASHBOARD_EXTRA_CSS = """
 .shortcut.check{border-top:3px solid var(--yellow)}
 .shortcut.eula{border-top:3px solid var(--blue)}
 .shortcut.plugins{border-top:3px solid var(--purple)}
+.shortcut.environment{border-top:3px solid var(--orange)}
 .shortcut.admin{border-top:3px solid var(--text)}
 @media (max-width:600px){
   .cards{grid-template-columns:1fr;max-width:380px}
@@ -1101,8 +1107,10 @@ _DASHBOARD_EXTRA_JS = r"""
   try {
     const d = await fetchJSON('/api/auth/me', { cache: 'no-store' }, 8000);
     if (d && d.user && d.user.role === 'admin') {
-      const card = document.getElementById('card-admin');
-      if (card) card.hidden = false;
+      ['card-admin', 'card-environment'].forEach(function(id){
+        const card = document.getElementById(id);
+        if (card) card.hidden = false;
+      });
     }
   } catch(e) { /* non-fatal: card simply stays hidden */ }
 })();

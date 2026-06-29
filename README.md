@@ -116,41 +116,15 @@ Para despliegue con VPN, reverse proxy, VPS o acceso remoto, consulta la [docume
 
 ## Variables de entorno
 
-Todas tienen valor por defecto. Ver `env-example` para una plantilla completa.
+El `.env` solo se usa para opciones que deben existir antes de arrancar los contenedores. El resto de ajustes se gestionan desde `/environment` con un usuario administrador.
 
 | Variable | Default | Descripcion |
 |---|---|---|
 | `TZ` | `Europe/Madrid` | Zona horaria del contenedor |
 | `WG_PRIVATE_KEY` | — | Clave privada WireGuard (solo con VPN) |
 | `ProtonCountries` | — | Paises para la conexion VPN |
-| `ACESTREAM_HOST` | `127.0.0.1` | Host del motor AceStream |
-| `ACESTREAM_PORT` | `6878` | Puerto del motor AceStream |
-| `ACESTREAM_IP` | — | IP publica opcional anunciada por AceStream |
-| `IPFS_GATEWAY` | `http://kubo:48080` | URL del gateway IPFS local |
-| `DB_PATH` | `/openace/checkdb/data.db` | Ruta de la base de datos SQLite |
-| `AUTH_ENABLED` | `true` | Activar/desactivar autenticacion |
-| `SESSION_DURATION_HOURS` | `24` | Duracion de la sesion en horas |
-| `REVERSE_PROXY` | `false` | Activar soporte reverse proxy; los compose VPS lo activan |
-| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | IPs de proxy permitidas por Gunicorn en modo reverse proxy |
-| `PUBLIC_BASE_URL` | — | URL publica opcional para generar playlists M3U absolutas |
-| `OPENACE_AUTO_SETUP` | `false` | Auto-setup sin wizard |
-| `OPENACE_ADMIN_USER` | `admin` | Nombre del usuario admin |
-| `OPENACE_ADMIN_PASSWORD` | — | Contrasena del admin (auto-setup) |
-| `OPENACE_EULA_ACCEPT` | `false` | Aceptar EULA automaticamente |
-| `OPENACE_IDLE_TIMEOUT_S` | `180` | Segundos de inactividad antes de cerrar un stream FFmpeg |
-| `OPENACE_CHUNK_SIZE` | `65536` | Tamano de lectura del pipe FFmpeg en bytes |
-| `OPENACE_QUEUE_MAX` | `256` | Tamano maximo de cola por cliente MPEG-TS |
-| `OPENACE_PIPE_BUFFER_SIZE` | `1048576` | Tamano del buffer del pipe del OS en bytes |
-| `OPENACE_MAX_STREAMS` | `32` | Maximo de streams FFmpeg simultaneos |
-| `OPENACE_ITERATE_TIMEOUT_S` | `180` | Timeout de iteracion del stream FFmpeg en segundos |
-| `OPENACE_FFMPEG_RW_TIMEOUT_US` | `120000000` | Timeout de lectura/escritura FFmpeg en microsegundos |
-| `OPENACE_FFMPEG_RESTARTS` | `3` | Reintentos maximos de FFmpeg por stream |
-| `OPENACE_FFMPEG_RESTART_BACKOFF_S` | `2` | Espera entre reintentos de FFmpeg en segundos |
-| `OPENACE_HLS_STALE_SEGMENT_MAX_AGE_S` | `30` | Edad maxima de segmentos HLS obsoletos antes de limpieza |
-| `GUNICORN_WORKERS` | `1` | Workers Gunicorn (1 recomendado: el estado de FFmpeg/timers es in-memory) |
-| `GUNICORN_WORKER_CONNECTIONS` | `2000` | Conexiones por worker gevent |
 
-Detalle completo en [Despliegue paso a paso](DOC/02-despliegue-paso-a-paso.md#variables-disponibles).
+Los ajustes de OpenAce, AceStream, IPFS, autenticacion, reverse proxy, streaming, HLS, Gunicorn y auto-setup se configuran desde `/environment`.
 
 ## Aviso legal
 

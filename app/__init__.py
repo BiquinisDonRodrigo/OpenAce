@@ -8,7 +8,7 @@ from werkzeug.exceptions import HTTPException
 
 from app.config import Config
 from app.logging_config import configure_logging
-from app.utils import auth_store, eula_store, setup_store
+from app.utils import auth_store, environment_store, eula_store, setup_store
 from app.utils.logging_utils import log_event
 from app.routes import register_blueprints
 
@@ -28,14 +28,8 @@ _AUTH_EXEMPT_PREFIXES = ("/eula", "/api/eula/", "/static/")
 
 _ROLE_HIERARCHY = {"admin": 3, "user": 2, "viewer": 1}
 
-_AUTH_ENABLED = None
-
-
 def _auth_enabled():
-    global _AUTH_ENABLED
-    if _AUTH_ENABLED is None:
-        _AUTH_ENABLED = os.environ.get("AUTH_ENABLED", "true").lower() not in ("false", "0", "no")
-    return _AUTH_ENABLED
+    return environment_store.get_bool("AUTH_ENABLED")
 
 
 def _is_first_boot():
@@ -59,6 +53,8 @@ def _get_required_role(path, method):
     if path.startswith("/play/"):
         return "viewer"
     if path.startswith("/admin/") or path.startswith("/api/admin/"):
+        return "admin"
+    if path.startswith("/environment") or path.startswith("/api/environment"):
         return "admin"
     if path.startswith("/api/peers/hls/") and path.endswith("/kill"):
         return "admin"
@@ -94,7 +90,7 @@ def _try_authenticate():
         session, user = auth_store.get_session_with_user(session_id)
         if session and _is_valid(user):
             if _should_renew(session):
-                duration = int(os.environ.get("SESSION_DURATION_HOURS", "24"))
+                duration = _session_duration_hours()
                 auth_store.renew_session(session_id, duration)
             g.auth_method = "session"
             return user
@@ -118,19 +114,30 @@ def _try_authenticate():
     auth = request.authorization
     if auth and auth.username and auth.password:
         client_ip = _client_ip()
-        if not auth_store.check_rate_limit(client_ip):
+        if not auth_store.check_and_record_login_attempt(client_ip):
             return None
         user = auth_store.verify_password_cached(auth.username, auth.password)
         if user:
+            auth_store.clear_login_attempts(client_ip)
             g.auth_method = "basic"
             return user
-        auth_store.record_failed_attempt(client_ip)
 
     return None
 
 
 def _client_ip():
     return request.remote_addr or "0.0.0.0"
+
+
+def _session_duration_hours():
+    try:
+        return environment_store.get_int("SESSION_DURATION_HOURS")
+    except (TypeError, ValueError):
+        return 24
+
+
+def _secure_cookie():
+    return request.is_secure or environment_store.get_bool("REVERSE_PROXY")
 
 
 def _origin_ok():
@@ -183,9 +190,9 @@ def _auto_setup():
     from datetime import datetime, timezone
     from app.utils.plugin_refresh import bootstrap_all
 
-    admin_user = os.environ.get("OPENACE_ADMIN_USER", "admin")
-    admin_pass = os.environ.get("OPENACE_ADMIN_PASSWORD")
-    eula_accept = os.environ.get("OPENACE_EULA_ACCEPT", "").lower() in ("true", "1", "yes")
+    admin_user = environment_store.get_str("OPENACE_ADMIN_USER") or "admin"
+    admin_pass = environment_store.get_str("OPENACE_ADMIN_PASSWORD")
+    eula_accept = environment_store.get_bool("OPENACE_EULA_ACCEPT")
 
     if not admin_pass:
         log_event("error", "auto_setup_failed", "core",
@@ -227,13 +234,14 @@ def create_app():
     # Ensure session is available for CSRF tokens and language preference.
     app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
     app.config.setdefault("SESSION_COOKIE_SAMESITE", "Lax")
+    app.config.setdefault("SESSION_COOKIE_SECURE", environment_store.get_bool("REVERSE_PROXY"))
 
-    if os.environ.get("REVERSE_PROXY", "").lower() in ("true", "1", "yes"):
+    if environment_store.get_bool("REVERSE_PROXY"):
         from werkzeug.middleware.proxy_fix import ProxyFix
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
     if os.environ.get('WERKZEUG_RUN_MAIN') or not app.debug:
         auto_setup_ran = False
-        if (os.environ.get("OPENACE_AUTO_SETUP", "").lower() in ("true", "1", "yes")
+        if (environment_store.get_bool("OPENACE_AUTO_SETUP")
                 and setup_store.is_setup_required()):
             _auto_setup()
             auto_setup_ran = True
@@ -245,7 +253,7 @@ def create_app():
 
             generated_pw = auth_store.ensure_admin_exists()
             if generated_pw:
-                admin_user = os.environ.get("OPENACE_ADMIN_USER", "admin")
+                admin_user = environment_store.get_str("OPENACE_ADMIN_USER") or "admin"
                 print(f"\n{'=' * 60}")
                 print(f"  OPENACE — CONTRASEÑA ADMIN GENERADA")
                 print(f"  Usuario:     {admin_user}")
@@ -297,7 +305,7 @@ def create_app():
                     tok,
                     httponly=False,  # must be readable by JS
                     samesite="Lax",
-                    secure=request.is_secure,
+                    secure=_secure_cookie(),
                 )
         except Exception:
             pass
@@ -306,7 +314,7 @@ def create_app():
             from flask import session as _session
             lang = _session.get("lang")
             if lang and not request.cookies.get("lang"):
-                response.set_cookie("lang", lang, samesite="Lax", max_age=31536000)
+                response.set_cookie("lang", lang, samesite="Lax", secure=_secure_cookie(), max_age=31536000)
         except Exception:
             pass
         return response

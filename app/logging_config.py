@@ -11,19 +11,35 @@ LOG_DIR = "/var/log/openace"
 LOG_FILE = os.path.join(LOG_DIR, "proxy.log")
 
 _TOKEN_RE = re.compile(r'([\?&]token=)[^\s&"\']+')
+_SENSITIVE_KEYS = {"token", "password", "authorization", "secret", "api_key", "apikey"}
+
+
+def _redact_value(value, key=""):
+    key_l = str(key).lower()
+    if any(part in key_l for part in _SENSITIVE_KEYS):
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {k: _redact_value(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(v, key) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_value(v, key) for v in value)
+    if isinstance(value, str):
+        return _TOKEN_RE.sub(r'\1[REDACTED]', value)
+    if isinstance(value, bytes):
+        return _TOKEN_RE.sub(r'\1[REDACTED]', value.decode("utf-8", errors="replace"))
+    return value
 
 
 class _RedactTokenFilter(logging.Filter):
     def filter(self, record):
         if isinstance(record.msg, dict):
-            if not any(
-                isinstance(v, (str, bytes)) and "token=" in str(v)
-                for v in record.msg.values()
-            ):
-                return True
+            record.msg = _redact_value(record.msg)
+            return True
         msg = record.getMessage()
-        if "token=" in msg:
-            record.msg = _TOKEN_RE.sub(r'\1[REDACTED]', msg)
+        redacted = _redact_value(msg)
+        if redacted != msg:
+            record.msg = redacted
             record.args = None
         return True
 
@@ -59,6 +75,7 @@ class OpenAceJsonFormatter(jsonlogger.JsonFormatter):
 
 
 def configure_logging():
+    logging.raiseExceptions = False
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 

@@ -21,13 +21,16 @@ EXPECTED_PHRASE = "He leído y acepto el acuerdo"
 CHECKBOX_ACCEPT_MARKER = "EULA-OA-CHECKBOX-ACCEPTED-1.0"
 
 _accepted_cache = None
+_accepted_cache_ts = 0.0
 _accepted_cache_lock = threading.Lock()
+_ACCEPTED_CACHE_TTL_S = 5.0
 
 
 def _invalidate_accepted_cache():
-    global _accepted_cache
+    global _accepted_cache, _accepted_cache_ts
     with _accepted_cache_lock:
         _accepted_cache = None
+        _accepted_cache_ts = 0.0
 
 
 def phrase_hash(phrase: str) -> str:
@@ -102,9 +105,12 @@ def revoke(ip: str) -> bool:
 
 
 def is_globally_accepted() -> bool:
-    global _accepted_cache
-    if _accepted_cache is not None:
-        return _accepted_cache
+    global _accepted_cache, _accepted_cache_ts
+    now = time.monotonic()
+    with _accepted_cache_lock:
+        if (_accepted_cache is not None
+                and now - _accepted_cache_ts < _ACCEPTED_CACHE_TTL_S):
+            return _accepted_cache
     _ensure_init()
     conn = _connect()
     try:
@@ -116,6 +122,7 @@ def is_globally_accepted() -> bool:
     accepted = row is not None
     with _accepted_cache_lock:
         _accepted_cache = accepted
+        _accepted_cache_ts = now
     return accepted
 
 

@@ -1,3 +1,12 @@
+import socket
+import time
+
+from app.config import _load_or_create_secret_key
+from app.logging_config import _redact_value
+from app.routes import hls
+from app.utils import auth_store, environment_store, plugin_cache, plugin_refresh, plugin_store
+
+
 def _csrf_headers(token):
     return {"X-CSRF-Token": token}
 
@@ -174,3 +183,211 @@ class TestTokenAuth:
         r2 = c2.post("/api/plugins", json={"display_name": "Via Token", "source_url": "http://x/m.m3u"},
                      headers={"Authorization": f"Bearer {token_val}"})
         assert r2.status_code == 201
+
+
+class TestCriticalAuditFixes:
+    def test_ssrf_blocks_unspecified_ipv4_and_ipv6(self):
+        plugin_refresh._ssrf_cache.clear()
+        assert plugin_refresh._is_safe_source_url("http://0.0.0.0:6379/x") is False
+        assert plugin_refresh._is_safe_source_url("http://[::]:6379/x") is False
+
+    def test_pinned_dns_uses_validated_addrinfo(self, monkeypatch):
+        addrinfos = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))]
+        seen = []
+
+        class DummyResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def fake_get(url, **kwargs):
+            seen.append(socket.getaddrinfo("example.test", 80)[0][4][0])
+            return DummyResponse()
+
+        monkeypatch.setattr(plugin_refresh.session, "get", fake_get)
+        with plugin_refresh._get_with_pinned_dns("http://example.test/feed.m3u", addrinfos):
+            pass
+
+        assert seen == ["93.184.216.34"]
+
+    def test_eula_rejects_string_false(self, client):
+        r = client.post("/api/eula/accept", json={"accepted": "false"})
+        assert r.status_code == 400
+
+    def test_update_user_enabled_string_false_disables(self):
+        username = f"disabled-{time.time_ns()}"
+        user = auth_store.create_user(username, "test-password-123", role="user")
+        updated = auth_store.update_user(user["id"], {"enabled": "false"})
+        assert updated["enabled"] is False
+
+    def test_basic_auth_cache_does_not_store_plain_password(self):
+        auth_store._basic_auth_cache.clear()
+        username = f"basic-cache-{time.time_ns()}"
+        password = "test-password-123"
+        auth_store.create_user(username, password, role="user")
+        assert auth_store.verify_password_cached(username, password) is not None
+        assert auth_store._basic_auth_cache
+        assert all(key[1] != password for key in auth_store._basic_auth_cache)
+
+    def test_login_rate_limit_check_and_record_is_atomic(self):
+        ip = "203.0.113.10"
+        auth_store.clear_login_attempts(ip)
+        assert [auth_store.check_and_record_login_attempt(ip) for _ in range(5)] == [True] * 5
+        assert auth_store.check_and_record_login_attempt(ip) is False
+
+
+class TestMediumAuditFixes:
+    def test_renew_session_preserves_created_at(self):
+        user = auth_store.create_user(f"renew-{time.time_ns()}", "test-password-123")
+        sid = auth_store.create_session(user["id"], "127.0.0.1", duration_hours=1)
+        before = auth_store.get_session(sid)["created_at"]
+        auth_store.renew_session(sid, duration_hours=2)
+        after = auth_store.get_session(sid)
+        assert after["created_at"] == before
+
+    def test_invalid_session_duration_falls_back(self, client, monkeypatch):
+        monkeypatch.setenv("SESSION_DURATION_HOURS", "bad")
+        r = client.post("/api/auth/login", json={"username": "admin", "password": "test-password-123"})
+        assert r.status_code == 200
+
+    def test_update_user_rejects_bad_username(self, authed):
+        client, token = authed
+        r = client.put("/api/admin/users/1", json={"username": "x!"}, headers=_csrf_headers(token))
+        assert r.status_code == 400
+
+    def test_admin_cannot_disable_self(self, authed):
+        client, token = authed
+        r = client.put("/api/admin/users/1", json={"enabled": False}, headers=_csrf_headers(token))
+        assert r.status_code == 400
+
+    def test_hls_manifest_cold_start_returns_retry_after(self, authed, tmp_path):
+        client, _ = authed
+
+        class Manager:
+            def ensure_stream(self, content_id):
+                return str(tmp_path)
+
+            def is_alive(self, content_id):
+                return True
+
+        hls.set_manager(Manager())
+        r = client.get(f"/play/hls/{'a' * 40}?hls_client={'b' * 32}")
+        assert r.status_code == 503
+        assert r.headers["Retry-After"] == "1"
+
+    def test_log_redaction_preserves_dict_shape(self):
+        redacted = _redact_value({"event": "x", "url": "/play?token=abc", "nested": {"password": "pw"}})
+        assert redacted["event"] == "x"
+        assert redacted["url"] == "/play?token=[REDACTED]"
+        assert redacted["nested"]["password"] == "[REDACTED]"
+
+    def test_empty_secret_file_is_persisted(self, tmp_path, monkeypatch):
+        secret_file = tmp_path / "secret"
+        secret_file.write_text("")
+        monkeypatch.delenv("OPENACE_SECRET_KEY", raising=False)
+        monkeypatch.delenv("SECRET_KEY", raising=False)
+        monkeypatch.setenv("OPENACE_SECRET_FILE", str(secret_file))
+        value = _load_or_create_secret_key()
+        assert value
+        assert secret_file.read_text().strip() == value
+
+    def test_plugin_json_import_filters_invalid_channels(self, authed):
+        client, token = authed
+        payload = {
+            "name": "json-filter",
+            "display_name": "Json Filter",
+            "source_url": "http://example.com/list.m3u",
+            "channels": [{"name": "bad"}, "bad", {"name": "ok", "infohash": "a" * 40}],
+        }
+        r = client.post("/api/plugins/import", json=payload, headers=_csrf_headers(token))
+        assert r.status_code == 200
+        assert r.get_json()["imported"][0]["channels"] == 1
+
+
+class TestEnvironmentModule:
+    def test_environment_page_requires_admin(self, client):
+        r = client.get("/environment")
+        assert r.status_code in (302, 401)
+
+    def test_panel_contains_environment_shortcut(self, authed):
+        client, _ = authed
+        r = client.get("/panel")
+        assert r.status_code == 200
+        html = r.get_data(as_text=True)
+        assert 'href="/environment"' in html
+        assert 'id="card-environment"' in html
+
+    def test_environment_page_renders_table_headers(self, authed):
+        client, _ = authed
+        r = client.get("/environment")
+        assert r.status_code == 200
+        html = r.get_data(as_text=True)
+        assert "Nombre del parametro" in html
+        assert "Valor del parametro" in html
+        assert "Descripcion" in html
+
+    def test_environment_api_lists_settings(self, authed):
+        client, _ = authed
+        r = client.get("/api/environment")
+        assert r.status_code == 200
+        keys = {item["key"] for item in r.get_json()["items"]}
+        assert "ACESTREAM_PORT" in keys
+        assert "ACESTREAM_IP" not in keys
+        assert "WG_PRIVATE_KEY" not in keys
+        assert "ProtonCountries" not in keys
+        assert "TZ" not in keys
+        groups = {item["group"] for item in r.get_json()["items"]}
+        assert "OpenAce" in groups
+        assert "FFmpeg" in groups
+        assert "HLS" in groups
+
+    def test_environment_update_validates_and_persists(self, authed):
+        client, token = authed
+        bad = client.put(
+            "/api/environment",
+            json={"values": {"ACESTREAM_PORT": "bad"}},
+            headers=_csrf_headers(token),
+        )
+        assert bad.status_code == 400
+
+        ok = client.put(
+            "/api/environment",
+            json={"values": {"SESSION_DURATION_HOURS": "48"}},
+            headers=_csrf_headers(token),
+        )
+        assert ok.status_code == 200
+        assert environment_store.get_int("SESSION_DURATION_HOURS") == 48
+
+    def test_environment_reset_restores_default(self, authed):
+        client, token = authed
+        client.put(
+            "/api/environment",
+            json={"values": {"SESSION_DURATION_HOURS": "48"}},
+            headers=_csrf_headers(token),
+        )
+        r = client.delete("/api/environment/SESSION_DURATION_HOURS", headers=_csrf_headers(token))
+        assert r.status_code == 200
+        assert environment_store.get_int("SESSION_DURATION_HOURS") == 24
+
+    def test_playlist_uses_request_ip_or_domain(self, authed):
+        client, token = authed
+        plugin = plugin_store.create({"name": "playlist-host", "display_name": "Playlist Host"})
+        plugin_cache.set_channels(plugin["id"], [{"name": "One", "group_title": "G", "infohash": "a" * 40}])
+        client.put(
+            "/api/environment",
+            json={"values": {"PUBLIC_BASE_URL": "https://openace.dominio1.tld\nhttps://openace.dominio2.tld"}},
+            headers=_csrf_headers(token),
+        )
+        playlist_token = auth_store.create_token(1, description="playlist-test")["token"]
+
+        by_ip = client.get(f"/playlist-host/hls.m3u?token={playlist_token}", base_url="http://10.69.69.253:8888")
+        assert by_ip.status_code == 200
+        assert "http://10.69.69.253:8888/play/hls/" in by_ip.get_data(as_text=True)
+
+        by_domain = client.get(f"/playlist-host/hls.m3u?token={playlist_token}", base_url="https://openace.dominio2.tld")
+        assert by_domain.status_code == 200
+        body = by_domain.get_data(as_text=True)
+        assert "https://openace.dominio2.tld/play/hls/" in body
+        assert "openace.dominio1.tld/play/hls/" not in body

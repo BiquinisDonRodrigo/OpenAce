@@ -1,3 +1,4 @@
+import hashlib
 import os
 import secrets
 import threading
@@ -7,6 +8,7 @@ from uuid import uuid4
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from app.utils import environment_store
 from app.utils.check_store import _connect, _ensure_init, _lock
 from app.utils.logging_utils import log_event
 
@@ -27,6 +29,21 @@ _last_api_purge = 0.0
 _basic_auth_cache = {}
 _basic_auth_cache_lock = threading.Lock()
 _BASIC_AUTH_TTL_S = 30
+_last_basic_auth_purge = 0.0
+
+
+def _password_cache_digest(password):
+    return hashlib.sha256(password.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def _parse_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return False
 
 
 def _invalidate_basic_auth_cache(username=None):
@@ -183,7 +200,7 @@ def update_user(user_id, data):
         if key in data:
             value = data[key]
             if key == "enabled":
-                value = 1 if value else 0
+                value = 1 if _parse_bool(value) else 0
             if key == "role" and value not in ("admin", "user", "viewer"):
                 raise ValueError("Rol inválido: %r" % (value,))
             fields.append(f"{key} = ?")
@@ -277,15 +294,28 @@ def verify_password_cached(username, password):
     """verify_password with a short TTL cache to avoid re-running the KDF
     on every Basic-Auth request (IPTV clients send credentials per request)."""
     now = time.time()
+    cache_key = (username, _password_cache_digest(password))
     with _basic_auth_cache_lock:
-        entry = _basic_auth_cache.get((username, password))
+        _purge_basic_auth_cache(now)
+        entry = _basic_auth_cache.get(cache_key)
     if entry and now - entry[1] < _BASIC_AUTH_TTL_S:
         return entry[0]
     user = verify_password(username, password)
     if user:
         with _basic_auth_cache_lock:
-            _basic_auth_cache[(username, password)] = (user, now)
+            _basic_auth_cache[cache_key] = (user, now)
     return user
+
+
+def _purge_basic_auth_cache(now):
+    global _last_basic_auth_purge
+    if now - _last_basic_auth_purge < _BASIC_AUTH_TTL_S:
+        return
+    _last_basic_auth_purge = now
+    stale = [key for key, (_, ts) in _basic_auth_cache.items()
+             if now - ts >= _BASIC_AUTH_TTL_S]
+    for key in stale:
+        _basic_auth_cache.pop(key, None)
 
 
 def update_last_login(user_id):
@@ -349,8 +379,9 @@ def get_session(session_id):
             return None
         expires_at = _parse_iso(row["expires_at"])
         if expires_at < datetime.now(timezone.utc):
-            conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-            conn.commit()
+            with _lock:
+                conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+                conn.commit()
             return None
     finally:
         conn.close()
@@ -386,8 +417,9 @@ def get_session_with_user(session_id):
             return None, None
         expires_at = _parse_iso(row["expires_at"])
         if expires_at < datetime.now(timezone.utc):
-            conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-            conn.commit()
+            with _lock:
+                conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+                conn.commit()
             return None, None
     finally:
         conn.close()
@@ -413,13 +445,12 @@ def get_session_with_user(session_id):
 def renew_session(session_id, duration_hours=24):
     now = datetime.now(timezone.utc)
     new_expires = (now + timedelta(hours=duration_hours)).isoformat()
-    new_created = now.isoformat()
     with _lock:
         conn = _connect()
         try:
             conn.execute(
-                "UPDATE sessions SET expires_at = ?, created_at = ? WHERE id = ?",
-                (new_expires, new_created, session_id),
+                "UPDATE sessions SET expires_at = ? WHERE id = ?",
+                (new_expires, session_id),
             )
             conn.commit()
         finally:
@@ -616,6 +647,25 @@ def record_failed_attempt(ip):
         _login_attempts[ip] = attempts
 
 
+def check_and_record_login_attempt(ip):
+    now = time.time()
+    with _rate_lock:
+        _purge_stale_ips(now)
+        attempts = _login_attempts.get(ip, [])
+        attempts = [t for t in attempts if now - t < 300]
+        if len(attempts) >= 5:
+            _login_attempts[ip] = attempts
+            return False
+        attempts.append(now)
+        _login_attempts[ip] = attempts
+        return True
+
+
+def clear_login_attempts(ip):
+    with _rate_lock:
+        _login_attempts.pop(ip, None)
+
+
 _last_purge = 0.0
 
 
@@ -665,8 +715,8 @@ def ensure_admin_exists():
     _ensure_auth_init()
     if user_count() > 0:
         return None
-    admin_user = os.environ.get("OPENACE_ADMIN_USER", "admin")
-    admin_pass_env = os.environ.get("OPENACE_ADMIN_PASSWORD")
+    admin_user = environment_store.get_str("OPENACE_ADMIN_USER") or "admin"
+    admin_pass_env = environment_store.get_str("OPENACE_ADMIN_PASSWORD")
     admin_pass = admin_pass_env or secrets.token_urlsafe(12)
     create_user(admin_user, admin_pass, role="admin")
     log_event("info", "admin_user_created", COMPONENT, username=admin_user)

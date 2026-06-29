@@ -919,6 +919,7 @@ _HEADER_NAV = (
     ("/peers", "nav.peers", "user"),
     ("/plugins", "nav.plugins", "user"),
     ("/check", "nav.checker", "user"),
+    ("/environment", "nav.environment", "admin"),
     ("/admin/users", "nav.users", "admin"),
     ("/eula", "nav.eula", None),
 )
@@ -967,7 +968,7 @@ def _render_header(active_nav: str = "", page_title_key: str = "") -> str:
             links.append(
                 f'<a href="{path}"{attr}>{_html.escape(_(label_key))}</a>'
             )
-        nav_html = '<nav aria-label="' + _("nav.primary") + '">' + "".join(links) + "</nav>"
+        nav_html = '<nav aria-label="' + _html.escape(_("nav.primary")) + '">' + "".join(links) + "</nav>"
 
     user = getattr(g, "user", None)
     user_chip = ""
@@ -991,7 +992,7 @@ def _render_header(active_nav: str = "", page_title_key: str = "") -> str:
     # Theme toggle button
     theme_btn = (
         '<button type="button" id="theme-toggle" class="icon-btn" '
-        'aria-label="' + _("nav.theme_toggle") + '" title="' + _("nav.theme_toggle") + '">'
+        'aria-label="' + _html.escape(_("nav.theme_toggle")) + '" title="' + _html.escape(_("nav.theme_toggle")) + '">'
         '<span aria-hidden="true">\u263E</span>'
         '</button>'
     )
@@ -1004,7 +1005,7 @@ def _render_header(active_nav: str = "", page_title_key: str = "") -> str:
     )
     lang_select = (
         '<select class="icon-btn" onchange="switchLang(this.value)" '
-        'aria-label="' + _("nav.language") + '">' + lang_options + '</select>'
+        'aria-label="' + _html.escape(_("nav.language")) + '">' + lang_options + '</select>'
     )
 
     brand = (

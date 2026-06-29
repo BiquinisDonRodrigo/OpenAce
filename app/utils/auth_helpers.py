@@ -3,6 +3,8 @@ from functools import wraps
 
 from flask import Response, g, jsonify, redirect, request
 
+from app.utils import environment_store
+
 ROLE_HIERARCHY = {"admin": 3, "user": 2, "viewer": 1}
 
 
@@ -25,15 +27,12 @@ def get_json_body():
         return None, (jsonify({"error": "JSON debe ser un objeto"}), 400)
     return data, None
 
-_AUTH_ENABLED = os.environ.get("AUTH_ENABLED", "true").lower() not in ("false", "0", "no")
-
-
 def current_user():
     return getattr(g, "user", None)
 
 
 def auth_enabled():
-    return _AUTH_ENABLED
+    return environment_store.get_bool("AUTH_ENABLED")
 
 
 def require_role(role):

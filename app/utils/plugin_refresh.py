@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 import requests
 
 from app.utils.m3u_parser import extract_infohash, iter_extinf_entries
-from app.utils import plugin_cache, plugin_store
+from app.utils import environment_store, plugin_cache, plugin_store
 from app.utils.logging_utils import log_event
 from app.utils.upstream import session
 
@@ -18,7 +18,18 @@ MAX_M3U_SIZE = 50 * 1024 * 1024
 
 _ssrf_cache = {}
 _ssrf_cache_lock = threading.Lock()
+_ssrf_pin_lock = threading.Lock()
 _SSRF_CACHE_TTL_S = 300
+_SSRF_CACHE_MAX = 1024
+
+
+def _purge_ssrf_cache_locked(now):
+    stale = [key for key, entry in _ssrf_cache.items() if now - entry[2] >= _SSRF_CACHE_TTL_S]
+    for key in stale:
+        _ssrf_cache.pop(key, None)
+    while len(_ssrf_cache) > _SSRF_CACHE_MAX:
+        oldest = min(_ssrf_cache, key=lambda key: _ssrf_cache[key][2])
+        _ssrf_cache.pop(oldest, None)
 
 
 def _resolve_ipfs_url(url):
@@ -30,7 +41,7 @@ def _resolve_ipfs_url(url):
     for prefix in ('/ipns/', '/ipfs/'):
         idx = path.find(prefix)
         if idx >= 0:
-            gateway = os.environ.get("IPFS_GATEWAY", "http://kubo:48080").rstrip('/')
+            gateway = environment_store.get_str("IPFS_GATEWAY").rstrip('/')
             rewritten = f"{gateway}{path[idx:]}"
             if parsed.query:
                 rewritten += f"?{parsed.query}"
@@ -46,42 +57,88 @@ def _is_safe_source_url(url):
     setups where M3U sources live on the local network. Redirects are
     separately disabled at the requests.get call site.
     """
-    if not url:
-        return False
-    now = time.time()
-    with _ssrf_cache_lock:
-        entry = _ssrf_cache.get(url)
-        if entry and now - entry[1] < _SSRF_CACHE_TTL_S:
-            return entry[0]
-    result = _check_ssrf(url)
-    with _ssrf_cache_lock:
-        _ssrf_cache[url] = (result, now)
-    return result
+    resolved_url, _ = _resolve_safe_source(url)
+    return resolved_url is not None
+
+
+def _default_port(parsed):
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if port:
+        return port
+    return 443 if parsed.scheme == "https" else 80
 
 
 def _check_ssrf(url):
+    return _resolve_safe_addrinfos(url) is not None
+
+
+def _resolve_safe_addrinfos(url):
     try:
         parsed = urlparse(url)
     except ValueError:
-        return False
+        return None
     if parsed.scheme not in ("http", "https"):
-        return False
+        return None
     hostname = parsed.hostname
     if not hostname:
-        return False
+        return None
+    port = _default_port(parsed)
+    if port is None:
+        return None
     try:
-        addrinfos = socket.getaddrinfo(hostname, None)
+        addrinfos = socket.getaddrinfo(hostname, port)
     except (socket.gaierror, socket.herror):
-        return False
+        return None
+    checked_any = False
     for family, _, _, _, sockaddr in addrinfos:
         ip = sockaddr[0]
         try:
             ip_obj = ipaddress.ip_address(ip)
         except ValueError:
             continue
-        if ip_obj.is_loopback or ip_obj.is_link_local:
-            return False
-    return True
+        checked_any = True
+        if ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_unspecified:
+            return None
+    return addrinfos if checked_any else None
+
+
+def _resolve_safe_source(url):
+    resolved_url = _resolve_ipfs_url(url)
+    if not resolved_url:
+        return None, None
+    now = time.time()
+    with _ssrf_cache_lock:
+        _purge_ssrf_cache_locked(now)
+        entry = _ssrf_cache.get(resolved_url)
+        if entry and now - entry[2] < _SSRF_CACHE_TTL_S:
+            return (resolved_url, entry[1]) if entry[0] else (None, None)
+    addrinfos = _resolve_safe_addrinfos(resolved_url)
+    ok = addrinfos is not None
+    with _ssrf_cache_lock:
+        _ssrf_cache[resolved_url] = (ok, addrinfos, now)
+        _purge_ssrf_cache_locked(now)
+    return (resolved_url, addrinfos) if ok else (None, None)
+
+
+def _get_with_pinned_dns(url, addrinfos, **kwargs):
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    original_getaddrinfo = socket.getaddrinfo
+
+    def pinned_getaddrinfo(host, port, *args, **inner_kwargs):
+        if host == hostname:
+            return addrinfos
+        return original_getaddrinfo(host, port, *args, **inner_kwargs)
+
+    with _ssrf_pin_lock:
+        socket.getaddrinfo = pinned_getaddrinfo
+        try:
+            return session.get(url, **kwargs)
+        finally:
+            socket.getaddrinfo = original_getaddrinfo
 
 _timers = {}
 _timers_lock = threading.Lock()
@@ -120,13 +177,13 @@ def fetch_and_cache(plugin):
         plugin_store.update_refresh_status(plugin_id, "error", "no source URL", 0)
         return False
 
-    if not _is_safe_source_url(source_url):
+    resolved_url, addrinfos = _resolve_safe_source(source_url)
+    if not resolved_url:
         plugin_store.update_refresh_status(plugin_id, "error", "source URL blocked (SSRF guard)", 0)
         log_event("warning", "plugin_source_blocked", COMPONENT,
                   plugin=plugin["name"], source_url=source_url[:200])
         return False
 
-    resolved_url = _resolve_ipfs_url(source_url)
     headers = {}
     cached_channels = plugin_cache.get_channels(plugin_id)
     if cached_channels:
@@ -137,8 +194,8 @@ def fetch_and_cache(plugin):
         if last_modified:
             headers["If-Modified-Since"] = last_modified
     try:
-        with session.get(resolved_url, timeout=60, stream=True,
-                         allow_redirects=False, headers=headers) as resp:
+        with _get_with_pinned_dns(resolved_url, addrinfos, timeout=60, stream=True,
+                                  allow_redirects=False, headers=headers) as resp:
             if resp.status_code == 304:
                 plugin_store.update_refresh_status(plugin_id, "ok", None,
                                                     plugin.get("channel_count", 0))
@@ -149,9 +206,14 @@ def fetch_and_cache(plugin):
                 resp.close()
                 raise ValueError(f"Redirects not allowed for plugin source: {resp.status_code}")
             resp.raise_for_status()
-            content_length = int(resp.headers.get("Content-Length", 0))
+            try:
+                content_length = int(resp.headers.get("Content-Length", 0))
+            except (TypeError, ValueError):
+                content_length = 0
             if content_length > MAX_M3U_SIZE:
                 raise ValueError(f"M3U too large: {content_length} bytes")
+            new_etag = resp.headers.get("ETag")
+            new_last_modified = resp.headers.get("Last-Modified")
             chunks = []
             downloaded = 0
             for chunk in resp.iter_content(chunk_size=65536):
@@ -160,8 +222,6 @@ def fetch_and_cache(plugin):
                     raise ValueError(f"M3U too large: >{MAX_M3U_SIZE} bytes")
                 chunks.append(chunk)
         text = b"".join(chunks).decode("utf-8", errors="replace")
-        new_etag = resp.headers.get("ETag")
-        new_last_modified = resp.headers.get("Last-Modified")
     except Exception as e:
         error_msg = str(e)[:500]
         plugin_store.update_refresh_status(plugin_id, "error", error_msg, 0)
@@ -268,7 +328,7 @@ def bootstrap_all():
 def staggered_start(plugin, idx):
     """Start a plugin timer with a small jitter delay to avoid a
     thundering herd of simultaneous fetches during bootstrap."""
-    delay = random.uniform(0, idx * 1.5)
+    delay = random.uniform(0, min(idx * 1.5, 30))
 
     def _delayed():
         if delay > 0:

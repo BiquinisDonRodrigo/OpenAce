@@ -29,6 +29,7 @@ import threading
 import time
 
 from app.utils.logging_utils import log_event
+from app.utils import environment_store
 from app.utils.upstream import session as _http_session
 
 COMPONENT = "acestream_api"
@@ -477,8 +478,8 @@ def reset_api():
 
 def get_cached_engine_info():
     """Return cached ``get_engine_info()`` result, refreshing every ``CACHE_TTL_S``."""
-    host = os.environ.get("ACESTREAM_HOST", "127.0.0.1")
-    port = os.environ.get("ACESTREAM_PORT", "6878")
+    host = environment_store.get_str("ACESTREAM_HOST")
+    port = environment_store.get_str("ACESTREAM_PORT")
     monitor_port = os.environ.get("ACESTREAM_MONITOR_PORT")
     cache_key = (host, port, monitor_port)
     now = time.time()

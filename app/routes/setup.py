@@ -1,11 +1,12 @@
 import json
+import os
 import re
 from html import unescape as _html_unescape
 from datetime import datetime, timezone
 
 from flask import Blueprint, Response, jsonify, make_response, redirect, request
 
-from app.utils import auth_store, eula_store, plugin_store, setup_store
+from app.utils import auth_store, environment_store, eula_store, plugin_store, setup_store
 from app.utils import plugin_refresh
 from app.utils.auth_helpers import get_json_body, require_role
 from app.utils.logging_utils import log_event
@@ -21,8 +22,31 @@ def _slugify(text):
     return slug or 'plugin'
 
 
+def _prepare_setup_plugins(plugins_data):
+    prepared = []
+    for p in plugins_data:
+        display_name = (p.get("display_name") or "").strip()
+        if not display_name:
+            continue
+        name = _slugify(display_name)
+        if plugin_store.get_by_name(name):
+            continue
+        try:
+            refresh_minutes = int(p.get("refresh_minutes", 60))
+        except (TypeError, ValueError):
+            return None, "refresh_minutes inválido"
+        if refresh_minutes < 1 or refresh_minutes > 10080:
+            return None, "refresh_minutes fuera de rango"
+        prepared.append((p, name, display_name, refresh_minutes))
+    return prepared, None
+
+
 def _client_ip():
     return request.remote_addr
+
+
+def _secure_cookie():
+    return request.is_secure or environment_store.get_bool("REVERSE_PROXY")
 
 
 def _esc(s):
@@ -429,7 +453,8 @@ _STEP2_SCRIPT = r"""
 var additionalUsers=[];
 var hasExisting=(typeof _existing!=='undefined')&&_existing.length>0;
 
-function esc(s){return window.esc(s)}
+var baseEsc=window.esc;
+var esc=function(s){return baseEsc(s)};
 function showMsg(t,err){var m=document.getElementById('msg');m.textContent=t;m.className='msg'+(err?' err':'')}
 function roleBadge(r){var c=r==='admin'?'blue':r==='user'?'green':'yellow';return'<span class="badge badge-'+c+'">'+esc(r)+'</span>'}
 
@@ -585,7 +610,8 @@ _STEP3_SCRIPT = r"""
 var plugins=[];
 var hasExistingPlugins=(typeof _existingPlugins!=='undefined')&&_existingPlugins.length>0;
 
-function esc(s){return window.esc(s)}
+var baseEsc=window.esc;
+var esc=function(s){return baseEsc(s)};
 function showMsg(t,err){var m=document.getElementById('msg');m.textContent=t;m.className='msg'+(err?' err':'')}
 
 if(hasExistingPlugins){
@@ -871,7 +897,7 @@ def setup_users_post():
     duration = 24
     session_id = auth_store.create_session(admin["id"], _client_ip(), duration)
     resp.set_cookie("openace_session", session_id, httponly=True,
-                    secure=request.is_secure, samesite="Lax",
+                    secure=_secure_cookie(), samesite="Lax",
                     max_age=duration * 3600)
     return resp
 
@@ -892,20 +918,11 @@ def setup_plugins_post():
         return jsonify({"ok": True, "next": "/setup/summary"})
 
     plugins_data = data.get("plugins", [])
+    prepared, error = _prepare_setup_plugins(plugins_data)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
     created = []
-    for p in plugins_data:
-        display_name = (p.get("display_name") or "").strip()
-        if not display_name:
-            continue
-        name = _slugify(display_name)
-        if plugin_store.get_by_name(name):
-            continue
-        try:
-            refresh_minutes = int(p.get("refresh_minutes", 60))
-        except (TypeError, ValueError):
-            return jsonify({"ok": False, "error": "refresh_minutes inválido"}), 400
-        if refresh_minutes < 1 or refresh_minutes > 10080:
-            return jsonify({"ok": False, "error": "refresh_minutes fuera de rango"}), 400
+    for p, name, display_name, refresh_minutes in prepared:
         plugin = plugin_store.create({
             "name": name,
             "display_name": display_name,
@@ -979,7 +996,7 @@ def api_eula_step():
     data, jerr = get_json_body()
     if jerr:
         return jerr
-    if not data.get("accepted"):
+    if data.get("accepted") is not True:
         return jsonify({"status": "error",
                         "message": "Debes aceptar el EULA para continuar"}), 400
     ip = _client_ip()
@@ -1062,20 +1079,11 @@ def api_plugins_step():
                         "plugins_created": []}), 201
 
     plugins_data = data.get("plugins", [])
+    prepared, error = _prepare_setup_plugins(plugins_data)
+    if error:
+        return jsonify({"status": "error", "message": error}), 400
     created = []
-    for p in plugins_data:
-        display_name = (p.get("display_name") or "").strip()
-        if not display_name:
-            continue
-        name = _slugify(display_name)
-        if plugin_store.get_by_name(name):
-            continue
-        try:
-            refresh_minutes = int(p.get("refresh_minutes", 60))
-        except (TypeError, ValueError):
-            return jsonify({"status": "error", "message": "refresh_minutes inválido"}), 400
-        if refresh_minutes < 1 or refresh_minutes > 10080:
-            return jsonify({"status": "error", "message": "refresh_minutes fuera de rango"}), 400
+    for p, name, display_name, refresh_minutes in prepared:
         plugin = plugin_store.create({
             "name": name,
             "display_name": display_name,
@@ -1151,7 +1159,7 @@ def api_setup_complete():
     users_data = data.get("users", [])
     plugins_data = data.get("plugins", [])
 
-    if not eula_data.get("accepted"):
+    if eula_data.get("accepted") is not True:
         return jsonify({"status": "error", "message": "Debes aceptar el EULA"}), 400
 
     admin_user = (admin_data.get("username") or "").strip()

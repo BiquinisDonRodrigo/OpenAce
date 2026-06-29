@@ -30,19 +30,31 @@ class _PooledConn:
         object.__setattr__(self, "_conn", conn)
 
     def close(self):
+        conn = self._conn
+        if conn is None:
+            return
         with _pool_lock:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             if len(_pool) < _POOL_MAX:
-                _pool.append(self._conn)
+                _pool.append(conn)
+                object.__setattr__(self, "_conn", None)
             else:
                 try:
-                    self._conn.close()
+                    conn.close()
                 except Exception:
                     pass
+                object.__setattr__(self, "_conn", None)
 
     def __getattr__(self, name):
         return getattr(self._conn, name)
 
     def __setattr__(self, name, value):
+        if name == "_conn":
+            object.__setattr__(self, name, value)
+            return
         setattr(self._conn, name, value)
 
 
@@ -53,6 +65,7 @@ def _new_connection():
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("PRAGMA cache_size=-8192")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 

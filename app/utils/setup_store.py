@@ -1,4 +1,5 @@
 import threading
+import time
 from datetime import datetime, timezone
 
 from app.utils.check_store import _connect, _ensure_init, _lock
@@ -11,7 +12,9 @@ _setup_init_lock = threading.Lock()
 _setup_complete_lock = threading.Lock()
 
 _setup_complete_cache = None
+_setup_complete_cache_ts = 0.0
 _setup_cache_lock = threading.Lock()
+_SETUP_CACHE_TTL_S = 5.0
 
 
 def _ensure_setup_init():
@@ -41,9 +44,12 @@ def _ensure_setup_init():
 
 
 def is_setup_required():
-    global _setup_complete_cache
-    if _setup_complete_cache is not None:
-        return not _setup_complete_cache
+    global _setup_complete_cache, _setup_complete_cache_ts
+    now_mono = time.monotonic()
+    with _setup_cache_lock:
+        if (_setup_complete_cache is not None
+                and now_mono - _setup_complete_cache_ts < _SETUP_CACHE_TTL_S):
+            return not _setup_complete_cache
     _ensure_setup_init()
     conn = _connect()
     try:
@@ -55,6 +61,7 @@ def is_setup_required():
     completed = row is not None and row["value"] == "true"
     with _setup_cache_lock:
         _setup_complete_cache = completed
+        _setup_complete_cache_ts = now_mono
     return not completed
 
 
@@ -89,9 +96,10 @@ def set_state(key, value):
         finally:
             conn.close()
         if key == "setup_completed":
-            global _setup_complete_cache
+            global _setup_complete_cache, _setup_complete_cache_ts
             with _setup_cache_lock:
                 _setup_complete_cache = (value == "true")
+                _setup_complete_cache_ts = time.monotonic()
 
 
 def get_current_step():

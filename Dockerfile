@@ -39,8 +39,7 @@ COPY app/ /openace/app/
 COPY server.py start.sh babel.cfg ./
 
 # Compile i18n message catalogs (.po -> .mo)
-RUN python -m babel.messages.frontend compile -d app/translations -D messages || \
-    echo "Babel compile skipped (catalogs may be missing)"
+RUN python -m babel.messages.frontend compile -d app/translations -D messages
 
 RUN groupadd -r openace && useradd -r -g openace -d /openace -s /sbin/nologin openace && \
     mkdir -p /openace/checkdb /tmp/openace && \

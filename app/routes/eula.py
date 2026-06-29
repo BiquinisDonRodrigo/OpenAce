@@ -32,7 +32,7 @@ def eula_accept():
         # compatibility, but reject any request that does not signal genuine
         # consent. This closes the previous bug where the backend ignored
         # the client-side checkbox and always recorded acceptance.
-        via_checkbox = bool(payload.get("accepted"))
+        via_checkbox = payload.get("accepted") is True
         legacy_phrase = payload.get("phrase")
 
         if not via_checkbox and legacy_phrase != eula_store.EXPECTED_PHRASE:

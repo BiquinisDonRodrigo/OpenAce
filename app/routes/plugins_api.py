@@ -23,6 +23,12 @@ def _slugify(text):
     return slug or 'plugin'
 
 
+def _valid_channels(channels):
+    if not isinstance(channels, list):
+        return []
+    return [ch for ch in channels if isinstance(ch, dict) and ch.get("infohash")]
+
+
 def _validate_plugin_payload(data, *, partial=False):
     cleaned = dict(data or {})
     if not partial or "display_name" in cleaned:
@@ -153,6 +159,8 @@ def api_update_plugin(plugin_id):
             if conflict and conflict["id"] != plugin_id:
                 return jsonify({"error": f"Ya existe un plugin con el nombre '{data['name']}'"}), 409
         plugin = plugin_store.update(plugin_id, data)
+        if plugin is None:
+            return jsonify({"error": "Plugin no encontrado"}), 404
         refresh_engine.restart_plugin_timer(plugin)
         log_event("info", "plugin_updated", COMPONENT, plugin=plugin["name"])
         return jsonify(plugin)
@@ -216,7 +224,9 @@ def api_import_plugin(plugin_id):
         if f:
             text = f.read().decode("utf-8", errors="replace")
         else:
-            data = request.get_json(silent=True) or {}
+            data, jerr = get_json_body()
+            if jerr:
+                return jerr
             text = data.get("content", "")
 
         if not text.strip():
@@ -311,7 +321,9 @@ def api_import_json():
             raw = f.read().decode("utf-8", errors="replace")
             data = json.loads(raw)
         else:
-            data = request.get_json(silent=True)
+            data, jerr = get_json_body()
+            if jerr:
+                return jerr
 
         if not data:
             return jsonify({"error": "Sin datos JSON"}), 400
@@ -341,7 +353,7 @@ def api_import_json():
                 "refresh_interval": cleaned.get("refresh_interval", 3600),
                 "enabled": item.get("enabled", True),
             })
-            channels = item.get("channels", [])
+            channels = _valid_channels(item.get("channels", []))
             if channels:
                 plugin_cache.set_channels(plugin["id"], channels)
                 plugin_store.update_refresh_status(plugin["id"], "ok", None, len(channels))
@@ -485,7 +497,8 @@ _PLUGINS_EXTRA_JS = r"""
   var pluginsSeq = 0, channelsSeq = 0;
   var channelsPluginId = null;
 
-  function esc(s){ return window.esc(s); }
+  var baseEsc = window.esc;
+  var esc = function(s){ return baseEsc(s); };
   function toast(m, kind){ return window.toast(m, kind || 'success'); }
   function slugify(t){
     return String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'plugin';

@@ -35,6 +35,9 @@ doc/
 # Prompts internos
 prompt-a-mejorar/
 
+# To-do / informes locales
+To-do/
+
 # IDE
 .vscode/
 .idea/

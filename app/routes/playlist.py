@@ -1,10 +1,10 @@
-import os
+import re
 import threading
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from flask import Blueprint, Response, request
 
-from app.utils import plugin_cache, plugin_refresh, plugin_store
+from app.utils import environment_store, plugin_cache, plugin_refresh, plugin_store
 from app.utils.logging_utils import log_event
 
 playlist_bp = Blueprint('playlist', __name__)
@@ -15,10 +15,37 @@ _fetching_lock = threading.Lock()
 
 
 def _public_base_url():
-    configured = os.environ.get("PUBLIC_BASE_URL", "").strip()
-    if configured:
-        return configured.rstrip('/')
-    return request.host_url.rstrip('/')
+    request_origin = request.host_url.rstrip('/')
+    request_host = (request.host or "").lower()
+    request_hostname = (request.host.split(":", 1)[0] if request.host else "").lower()
+
+    for origin in _configured_public_origins():
+        parsed = urlparse(origin)
+        configured_host = (parsed.netloc or "").lower()
+        configured_hostname = (parsed.hostname or "").lower()
+        if request_host == configured_host or request_hostname == configured_hostname:
+            return origin.rstrip('/')
+    return request_origin
+
+
+def _configured_public_origins():
+    configured = environment_store.get_str("PUBLIC_BASE_URL").strip()
+    if not configured:
+        return []
+    origins = []
+    seen = set()
+    for item in [p.strip() for p in re.split(r"[\s,]+", configured) if p.strip()]:
+        candidate = item if "://" in item else f"https://{item}"
+        parsed = urlparse(candidate)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            continue
+        if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+            continue
+        origin = f"{parsed.scheme}://{parsed.netloc.lower()}".rstrip('/')
+        if origin not in seen:
+            seen.add(origin)
+            origins.append(origin)
+    return origins
 
 
 def _m3u_safe(value):

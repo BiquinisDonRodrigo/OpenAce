@@ -3,6 +3,7 @@ import time
 
 import requests
 
+from app.utils import environment_store
 from app.utils.logging_utils import log_event
 from app.utils.upstream import session
 
@@ -17,14 +18,14 @@ ERROR_STATUSES = {"err", "error"}
 READY_TIMEOUT_S = 60
 POLL_INTERVAL_S = 0.5
 # When the engine reports a READY status we can back off to reduce engine load.
-READY_POLL_INTERVAL_S = float(os.environ.get("OPENACE_STAT_POLL_READY_S", "2.0"))
+READY_POLL_INTERVAL_S = environment_store.get_float("OPENACE_STAT_POLL_READY_S")
 REQUEST_TIMEOUT_S = 5
 SESSION_RETRIES = 5
 SESSION_BACKOFF_S = 0.5
 _MAX_BACKOFF = 8.0
 
 # Treat a stream as dead early when peers==0 for this many consecutive polls.
-ZERO_PEER_DEAD_POLLS = int(os.environ.get("OPENACE_ZERO_PEER_DEAD_POLLS", "10"))
+ZERO_PEER_DEAD_POLLS = environment_store.get_int("OPENACE_ZERO_PEER_DEAD_POLLS")
 
 # Per-channel ceiling for the /check probe: how long we wait for the engine to
 # resolve an infohash before declaring it a timeout.
@@ -66,11 +67,19 @@ def negotiate_stream(engine_url, content_id, *, ready_timeout=READY_TIMEOUT_S,
         if status in READY_STATUSES:
             log_event("info", "acestream_ready", component, status=status,
                       peers=peers, is_live=is_live, **log_context)
+            # M2: surface engine-reported hints so the FFmpeg manager can tune
+            # rtbufsize / HLS segment size from the live bitrate and buffer time.
+            stat_hints = {
+                "player_buffer_time": last_stat.get("player_buffer_time") if last_stat else None,
+                "live_buffer_time": last_stat.get("live_buffer_time") if last_stat else None,
+                "current_bitrate": last_stat.get("current_bitrate") if last_stat else None,
+            }
             return {
                 "playback_url": playback_url,
                 "stat_url": stat_url,
                 "command_url": command_url,
                 "is_live": is_live,
+                "stat_hints": stat_hints,
             }
         if status in ERROR_STATUSES:
             log_event("warning", "acestream_stat_error", component, status=status, **log_context)

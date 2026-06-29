@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 
 from flask import Blueprint, Response, abort, redirect, request, send_from_directory
 
-from app.utils import stream_registry
+from app.utils import environment_store, stream_registry
 from app.utils.logging_utils import log_event
 
 hls_bp = Blueprint('hls', __name__, url_prefix='/play/hls')
@@ -17,8 +17,9 @@ MANIFEST_POLL_TIMEOUT_S = 30
 MANIFEST_POLL_INTERVAL_S = 0.5
 MANIFEST_FILENAME = "playlist.m3u8"
 HLS_CLIENT_PARAM = "hls_client"
-STALE_SEGMENT_MAX_AGE_S = int(os.environ.get("OPENACE_HLS_STALE_SEGMENT_MAX_AGE_S", "30"))
+STALE_SEGMENT_MAX_AGE_S = environment_store.get_int("OPENACE_HLS_STALE_SEGMENT_MAX_AGE_S")
 STALE_LOG_INTERVAL_S = 30
+HLS_LAZY = environment_store.get_bool("OPENACE_HLS_LAZY")
 SEGMENT_RE = re.compile(r'^[A-Za-z0-9_\-]+\.(?:ts|m3u8)$')
 _VALID_ID = re.compile(r'^[0-9a-fA-F]{40}$')
 _HLS_CLIENT_RE = re.compile(r'^[0-9a-f]{32}$')
@@ -71,16 +72,17 @@ def hls_manifest(content_id):
     )
 
     manifest_path = os.path.join(out_dir, MANIFEST_FILENAME)
-    deadline = time.monotonic() + MANIFEST_POLL_TIMEOUT_S
-    while not os.path.exists(manifest_path):
+    if not os.path.exists(manifest_path):
         if not _manager.is_alive(content_id):
             log_event("warning", "hls_ffmpeg_exited", COMPONENT, content_id=content_id)
             _manager.drop(content_id)
             return Response("Upstream not ready", status=503)
-        if time.monotonic() >= deadline:
-            log_event("warning", "hls_manifest_timeout", COMPONENT, content_id=content_id)
-            return Response("Stream buffering, retry", status=503)
-        time.sleep(MANIFEST_POLL_INTERVAL_S)
+        # M4: in lazy mode the session was spawned MPEG-TS-only; the first HLS
+        # request asks the manager to restart it with the HLS output enabled.
+        if HLS_LAZY and _manager.request_hls(content_id):
+            log_event("info", "hls_lazy_requested", COMPONENT, content_id=content_id)
+        log_event("info", "hls_manifest_not_ready", COMPONENT, content_id=content_id)
+        return Response("Stream buffering, retry", status=503, headers={"Retry-After": "1"})
 
     stale, newest_segment, age = _segments_stale(out_dir)
     if stale:
@@ -125,7 +127,7 @@ def hls_segment(content_id, filename):
         _log_missing_segment(out_dir, content_id, filename)
         abort(404)
     _manager.touch(content_id)
-    response = send_from_directory(out_dir, filename, mimetype="video/mp2t" if filename.endswith(".ts") else None)
+    response = send_from_directory(out_dir, filename, mimetype="video/MP2T" if filename.endswith(".ts") else None)
     return _apply_streaming_headers(response)
 
 

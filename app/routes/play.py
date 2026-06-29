@@ -25,7 +25,7 @@ def set_manager(manager):
     _manager = manager
 
 
-@play_bp.route('/mpegts/<content_id>')
+@play_bp.route('/mpegts/<content_id>', methods=['GET', 'HEAD'])
 def play(content_id):
     if not _VALID_ID.match(content_id):
         return Response("Invalid content id", status=400)
@@ -34,6 +34,15 @@ def play(content_id):
 
     log_context = {"content_id": content_id}
     log_event("info", "stream_request_started", COMPONENT, **log_context)
+
+    # Live MPEG-TS is not byte-seekable; honour HEAD metadata requests without
+    # subscribing to the stream, and ignore Range headers (some players emit
+    # "Range: bytes=0-" on live sources).
+    if request.method == 'HEAD':
+        return _apply_streaming_headers(Response(content_type='video/MP2T'))
+
+    if request.headers.get('Range'):
+        log_event("info", "play_range_ignored", COMPONENT, **log_context)
 
     stream, q = _manager.subscribe_mpegts(content_id)
     if stream is None:
@@ -53,4 +62,4 @@ def play(content_id):
             finally:
                 unregister(content_id, "mpegts", client_ip=client_ip)
 
-    return _apply_streaming_headers(Response(generate(), content_type='video/mp2t'))
+    return _apply_streaming_headers(Response(generate(), content_type='video/MP2T'))

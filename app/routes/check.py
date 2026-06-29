@@ -189,7 +189,15 @@ _CHECK_EXTRA_CSS = r"""
   .badge-muted  { background: rgba(139,148,158,.12); color: var(--muted); }
 
   .table-wrap { overflow: auto; max-height: calc(100vh - 330px); border: 1px solid var(--border); border-radius: 8px; }
-  table { width: 100%; border-collapse: collapse; table-layout: fixed; min-width: 1040px; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; min-width: 1305px; }
+  .w-channel { width: 250px; }
+  .w-group { width: 130px; }
+  .w-plugin { width: 90px; }
+  .w-id { width: 300px; }
+  .w-status { width: 90px; }
+  .w-response { width: 80px; }
+  .w-last { width: 120px; }
+  .w-actions { width: 245px; }
   th { text-align: left; padding: 8px 10px; font-size: 10px; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: .05em; border-bottom: 1px solid var(--border); white-space: nowrap; position: sticky; top: 0; z-index: 1; background: var(--surface); }
   th.sortable { cursor: pointer; user-select: none; }
   th.sortable:hover, th.sortable:focus { color: var(--text); outline: none; box-shadow: inset 0 0 0 2px var(--blue); }
@@ -201,10 +209,12 @@ _CHECK_EXTRA_CSS = r"""
   tbody tr:hover { background: rgba(88,166,255,.04); }
   .col-num { text-align: right; white-space: nowrap; }
   .col-id { word-break: break-all; white-space: normal; font-size: 11px; }
-  .col-actions .act-group { display: flex; flex-direction: row; gap: 4px; }
+  .col-actions { overflow: visible; }
+  .col-actions .act-group { display: flex; flex-direction: row; gap: 4px; align-items: center; min-width: 0; }
+  .col-actions .btn-mini, .col-actions .btn-copy { flex: 0 0 auto; }
   .empty { color: var(--muted); font-style: italic; padding: 24px; text-align: center; }
   .err { color: var(--red); font-size: 13px; }
-  .btn-copy { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 3px 8px; font-size: 11px; font-weight: 500; border-radius: 5px; width: 100%; text-align: center; }
+  .btn-copy { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 3px 8px; font-size: 11px; font-weight: 500; border-radius: 5px; width: auto; text-align: center; }
   .btn-copy:hover { color: var(--text); border-color: var(--blue); }
   .btn-copy.copied { color: var(--green); border-color: var(--green); }
   @media (max-width: 1320px) { .top-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .top-grid .progress-card { grid-column: 1 / -1; } }
@@ -279,6 +289,16 @@ _CHECK_BODY = r"""
     <div class="table-wrap">
       <table>
         <caption class="sr-only">Resultados de comprobación de canales AceStream</caption>
+        <colgroup>
+          <col class="w-channel">
+          <col class="w-group">
+          <col class="w-plugin">
+          <col class="w-id">
+          <col class="w-status">
+          <col class="w-response">
+          <col class="w-last">
+          <col class="w-actions">
+        </colgroup>
         <thead><tr>
           <th scope="col" class="sortable" data-key="name" data-type="text" tabindex="0">Canal</th>
           <th scope="col" class="sortable" data-key="group" data-type="text" tabindex="0">Grupo</th>
@@ -309,9 +329,7 @@ const STATUS_BADGE = {
 };
 const idleBadge = '<span class="badge badge-muted">—</span>';
 
-function esc(s) {
-  return window.esc(s);
-}
+const esc = window.esc;
 function copyText(text) {
   return window.copyToClipboard(text).then(function(ok){ if(!ok) throw new Error('copy_failed'); });
 }
@@ -373,7 +391,7 @@ function renderTable() {
       <td class="col-num cell-resp">${fmtMs(c.response_ms)}</td>
       <td class="mono cell-time">${relTime(c.last_check)}</td>
       <td class="col-actions"><div class="act-group">
-        <button class="btn-secondary btn-mini row-check" data-h="${h}" style="width:100%" type="button">Comprobar</button>
+        <button class="btn-secondary btn-mini row-check" data-h="${h}" type="button">Comprobar</button>
         <button class="btn-copy" data-h="${h}" data-fmt="mpegts" title="Copiar enlace MPEG-TS" type="button">📋 MPEG-TS</button>
         <button class="btn-copy" data-h="${h}" data-fmt="hls" title="Copiar enlace HLS" type="button">📋 HLS</button>
       </div></td>

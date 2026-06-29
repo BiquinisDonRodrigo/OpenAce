@@ -1,6 +1,8 @@
 import os
 import secrets
 
+from app.utils import environment_store
+
 
 def _load_or_create_secret_key():
     """Return a stable Flask secret key.
@@ -9,11 +11,11 @@ def _load_or_create_secret_key():
     installs users often start without a secret configured, so persist a random
     key beside the SQLite DB instead of silently using an ephemeral one.
     """
-    configured = os.getenv("OPENACE_SECRET_KEY") or os.getenv("SECRET_KEY")
+    configured = environment_store.get_str("OPENACE_SECRET_KEY") or os.getenv("SECRET_KEY")
     if configured:
         return configured
 
-    db_path = os.getenv("DB_PATH", "/openace/checkdb/data.db")
+    db_path = environment_store.get_str("DB_PATH") or "/openace/checkdb/data.db"
     secret_file = os.getenv(
         "OPENACE_SECRET_FILE",
         os.path.join(os.path.dirname(db_path), ".openace_secret_key"),
@@ -39,6 +41,12 @@ def _load_or_create_secret_key():
             existing = fh.read().strip()
             if existing:
                 return existing
+        try:
+            with open(secret_file, "w", encoding="utf-8") as fh:
+                fh.write(value + "\n")
+            os.chmod(secret_file, 0o600)
+        except OSError:
+            pass
         return value
     except OSError:
         # Last-resort fallback for read-only/local contexts. Docker/start.sh
@@ -47,7 +55,7 @@ def _load_or_create_secret_key():
 
 class Config:
     SECRET_KEY = _load_or_create_secret_key()
-    ACESTREAM_HOST = os.getenv("ACESTREAM_HOST", "127.0.0.1")
-    ACESTREAM_PORT = os.getenv("ACESTREAM_PORT", "6878")
+    SESSION_COOKIE_SECURE = environment_store.get_bool("REVERSE_PROXY")
+    ACESTREAM_HOST = environment_store.get_str("ACESTREAM_HOST")
+    ACESTREAM_PORT = environment_store.get_str("ACESTREAM_PORT")
     ACESTREAM_ENGINE = f"http://{ACESTREAM_HOST}:{ACESTREAM_PORT}"
-    ACESTREAM_IP = os.getenv("ACESTREAM_IP", "")

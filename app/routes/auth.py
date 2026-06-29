@@ -1,17 +1,38 @@
 import os
+import re
 
 from flask import Blueprint, Response, g, jsonify, make_response, redirect, request
 
-from app.utils import auth_store
+from app.utils import auth_store, environment_store
 from app.utils.auth_helpers import current_user, get_json_body, require_role
 from app.utils.logging_utils import log_event
 
 auth_bp = Blueprint("auth", __name__)
 COMPONENT = "auth"
+_USERNAME_RE = re.compile(r'^[A-Za-z0-9_.\-]+$')
 
 
 def _client_ip():
     return request.remote_addr
+
+
+def _session_duration_hours():
+    try:
+        return environment_store.get_int("SESSION_DURATION_HOURS")
+    except (TypeError, ValueError):
+        return 24
+
+
+def _secure_cookie():
+    return request.is_secure or environment_store.get_bool("REVERSE_PROXY")
+
+
+def _validate_username(username):
+    if len(username) < 3 or len(username) > 32:
+        return "El usuario debe tener entre 3 y 32 caracteres"
+    if not _USERNAME_RE.match(username):
+        return "Usuario solo puede contener letras, números, '.', '_' y '-'"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +61,7 @@ def api_login():
     if not username or not password:
         return jsonify({"ok": False, "error": "Usuario y contraseña requeridos"}), 400
 
-    if not auth_store.check_rate_limit(ip):
+    if not auth_store.check_and_record_login_attempt(ip):
         log_event("warning", "login_rate_limited", COMPONENT, ip=ip, username=username)
         return (
             jsonify({"ok": False, "error": "Demasiados intentos. Espera unos minutos."}),
@@ -49,11 +70,11 @@ def api_login():
 
     user = auth_store.verify_password(username, password)
     if user is None:
-        auth_store.record_failed_attempt(ip)
         log_event("warning", "login_failed", COMPONENT, ip=ip, username=username)
         return jsonify({"ok": False, "error": "Usuario o contraseña incorrectos"}), 401
+    auth_store.clear_login_attempts(ip)
 
-    duration = int(os.environ.get("SESSION_DURATION_HOURS", "24"))
+    duration = _session_duration_hours()
     old_session_id = request.cookies.get("openace_session")
     if old_session_id:
         auth_store.delete_session(old_session_id)
@@ -62,13 +83,12 @@ def api_login():
     auth_store.update_last_login(user["id"])
     log_event("info", "login_success", COMPONENT, ip=ip, username=username)
 
-    is_https = request.is_secure
     resp = jsonify({"ok": True, "user": user})
     resp.set_cookie(
         "openace_session",
         session_id,
         httponly=True,
-        secure=is_https,
+        secure=_secure_cookie(),
         samesite="Lax",
         max_age=duration * 3600,
     )
@@ -132,11 +152,9 @@ def api_create_user():
 
     if not username or not password:
         return jsonify({"error": "Usuario y contraseña requeridos"}), 400
-    if len(username) < 3 or len(username) > 32:
-        return jsonify({"error": "El usuario debe tener entre 3 y 32 caracteres"}), 400
-    import re as _re
-    if not _re.match(r'^[A-Za-z0-9_.\-]+$', username):
-        return jsonify({"error": "Usuario solo puede contener letras, números, '.', '_' y '-'"}), 400
+    username_error = _validate_username(username)
+    if username_error:
+        return jsonify({"error": username_error}), 400
     if len(password) < 8:
         return jsonify({"error": "La contraseña debe tener al menos 8 caracteres"}), 400
     if role not in ("admin", "user", "viewer"):
@@ -159,6 +177,17 @@ def api_update_user(user_id):
     data, jerr = get_json_body()
     if jerr:
         return jerr
+    me = current_user()
+    if "username" in data:
+        data["username"] = (data.get("username") or "").strip()
+        username_error = _validate_username(data["username"])
+        if username_error:
+            return jsonify({"error": username_error}), 400
+    if me and me["id"] == user_id:
+        if "role" in data and data["role"] != "admin":
+            return jsonify({"error": "No puedes degradarte a ti mismo"}), 400
+        if "enabled" in data and data["enabled"] in (False, 0, "0", "false", "False", "no", "off"):
+            return jsonify({"error": "No puedes deshabilitarte a ti mismo"}), 400
     if "username" in data and data["username"] != existing["username"]:
         conflict = auth_store.get_user_by_username(data["username"])
         if conflict and conflict["id"] != user_id:
@@ -517,7 +546,8 @@ _ADMIN_EXTRA_JS = r"""
   var editingUserId = null;
   var usersSeq = 0, tokensSeq = 0;
 
-  function esc(s){ return window.esc(s); }
+  var baseEsc = window.esc;
+  var esc = function(s){ return baseEsc(s); };
   function toast(m, kind){ return window.toast(m, kind || 'success'); }
 
   function relTime(iso){

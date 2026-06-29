@@ -10,6 +10,7 @@ from app.routes.eula import eula_bp
 from app.routes.plugins_api import plugins_api_bp
 from app.routes.auth import auth_bp
 from app.routes.setup import setup_bp
+from app.routes.environment import environment_bp
 from app.utils.ffmpeg_manager import FFmpegManager
 
 
@@ -36,4 +37,5 @@ def register_blueprints(app):
     app.register_blueprint(playlist_bp)
     app.register_blueprint(panel_bp)
     app.register_blueprint(check_bp)
+    app.register_blueprint(environment_bp)
     app.register_blueprint(eula_bp)

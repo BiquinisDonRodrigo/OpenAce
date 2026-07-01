@@ -89,6 +89,7 @@ cp env-example .env
 | `REVERSE_PROXY` | Activar soporte para reverse proxy | `false` |
 | `FORWARDED_ALLOW_IPS` | IPs de proxy permitidas por Gunicorn en modo reverse proxy | `127.0.0.1` |
 | `PUBLIC_BASE_URL` | URL publica opcional para generar playlists M3U absolutas | — |
+| `OPENACE_FFMPEG_ENABLED` | Activar FFmpeg para MPEG-TS/HLS; si esta en `false`, MPEG-TS mantiene `/play/mpegts/...` y se proxya directo desde AceStream, HLS devuelve 503 | `false` |
 | `OPENACE_IDLE_TIMEOUT_S` | Segundos de inactividad antes de cerrar streams FFmpeg | `180` |
 | `OPENACE_CHUNK_SIZE` | Tamano de lectura del pipe FFmpeg en bytes | `65536` |
 | `OPENACE_QUEUE_MAX` | Tamano maximo de cola por cliente MPEG-TS | `256` |

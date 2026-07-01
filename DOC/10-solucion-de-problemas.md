@@ -18,7 +18,7 @@ FFmpeg arranco pero todavia no ha producido el primer segmento (timeout de 30 s)
 
 ### HLS responde 503 "Stream stale, retry"
 
-El manifiesto HLS quedo obsoleto durante mas de 12 s. OpenAce descarta ese proceso FFmpeg y fuerza un nuevo arranque. Reintenta la peticion o cambia de canal y vuelve.
+El manifiesto o el segmento HLS mas reciente quedo obsoleto durante mas de 30 s (`OPENACE_HLS_STALE_SEGMENT_MAX_AGE_S`). OpenAce descarta ese proceso FFmpeg y fuerza un nuevo arranque. Reintenta la peticion o cambia de canal y vuelve.
 
 ### La playlist tarda o responde 503
 

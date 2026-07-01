@@ -1,9 +1,10 @@
+import os
 import socket
 import time
 
 from app.config import _load_or_create_secret_key
 from app.logging_config import _redact_value
-from app.routes import hls
+from app.routes import hls, panel
 from app.utils import auth_store, environment_store, plugin_cache, plugin_refresh, plugin_store
 
 
@@ -264,6 +265,7 @@ class TestMediumAuditFixes:
 
     def test_hls_manifest_cold_start_returns_retry_after(self, authed, tmp_path):
         client, _ = authed
+        environment_store.update_settings({"OPENACE_FFMPEG_ENABLED": "true"})
 
         class Manager:
             def ensure_stream(self, content_id):
@@ -272,10 +274,150 @@ class TestMediumAuditFixes:
             def is_alive(self, content_id):
                 return True
 
-        hls.set_manager(Manager())
+        try:
+            hls.set_manager(Manager())
+            r = client.get(f"/play/hls/{'a' * 40}?hls_client={'b' * 32}")
+            assert r.status_code == 503
+            assert r.headers["Retry-After"] == "1"
+        finally:
+            hls.set_manager(None)
+
+    def test_hls_returns_503_when_ffmpeg_disabled(self, authed):
+        client, _ = authed
         r = client.get(f"/play/hls/{'a' * 40}?hls_client={'b' * 32}")
         assert r.status_code == 503
-        assert r.headers["Retry-After"] == "1"
+        assert r.get_data(as_text=True) == "FFmpeg disabled"
+        segment = client.get(f"/play/hls/{'a' * 40}/seg000.ts")
+        assert segment.status_code == 503
+        assert segment.get_data(as_text=True) == "FFmpeg disabled"
+
+    def test_hls_segment_returns_503_when_ffmpeg_dead(self, authed, tmp_path):
+        client, _ = authed
+        environment_store.update_settings({"OPENACE_FFMPEG_ENABLED": "true"})
+        (tmp_path / "seg000.ts").write_bytes(b"stale")
+
+        class Manager:
+            def __init__(self):
+                self.dropped = 0
+                self.touched = 0
+
+            def output_dir(self, content_id):
+                return str(tmp_path)
+
+            def is_alive(self, content_id):
+                return False
+
+            def drop(self, content_id):
+                self.dropped += 1
+
+            def touch(self, content_id):
+                self.touched += 1
+
+        manager = Manager()
+        try:
+            hls.set_manager(manager)
+            r = client.get(f"/play/hls/{'a' * 40}/seg000.ts?hls_client={'b' * 32}")
+            assert r.status_code == 503
+            assert r.get_data(as_text=True) == "Stream stale, retry"
+            assert manager.dropped == 1
+            assert manager.touched == 0
+        finally:
+            hls.set_manager(None)
+
+    def test_hls_segment_returns_503_when_segment_stale(self, authed, tmp_path):
+        client, _ = authed
+        environment_store.update_settings({"OPENACE_FFMPEG_ENABLED": "true"})
+        segment = tmp_path / "seg000.ts"
+        segment.write_bytes(b"stale")
+        old = time.time() - 120
+        os.utime(segment, (old, old))
+
+        class Manager:
+            def __init__(self):
+                self.dropped = 0
+                self.touched = 0
+
+            def output_dir(self, content_id):
+                return str(tmp_path)
+
+            def is_alive(self, content_id):
+                return True
+
+            def drop(self, content_id):
+                self.dropped += 1
+
+            def touch(self, content_id):
+                self.touched += 1
+
+        manager = Manager()
+        try:
+            hls.set_manager(manager)
+            r = client.get(f"/play/hls/{'a' * 40}/seg000.ts?hls_client={'b' * 32}")
+            assert r.status_code == 503
+            assert r.get_data(as_text=True) == "Stream stale, retry"
+            assert manager.dropped == 1
+            assert manager.touched == 0
+        finally:
+            hls.set_manager(None)
+
+    def test_missing_segment_returns_503_when_alive(self, authed, tmp_path):
+        client, _ = authed
+        environment_store.update_settings({"OPENACE_FFMPEG_ENABLED": "true"})
+
+        class Manager:
+            def output_dir(self, content_id):
+                return str(tmp_path)
+
+            def is_alive(self, content_id):
+                return True
+
+        try:
+            hls.set_manager(Manager())
+            r = client.get(f"/play/hls/{'a' * 40}/seg000.ts?hls_client={'b' * 32}")
+            assert r.status_code == 503
+            assert r.headers["Retry-After"] == "1"
+            assert r.get_data(as_text=True) == "Segment not ready, retry"
+        finally:
+            hls.set_manager(None)
+
+    def test_missing_segment_returns_404_when_dead(self, authed, tmp_path):
+        client, _ = authed
+        environment_store.update_settings({"OPENACE_FFMPEG_ENABLED": "true"})
+
+        class Manager:
+            def output_dir(self, content_id):
+                return str(tmp_path)
+
+            def is_alive(self, content_id):
+                return False
+
+        try:
+            hls.set_manager(Manager())
+            r = client.get(f"/play/hls/{'a' * 40}/seg000.ts?hls_client={'b' * 32}")
+            assert r.status_code == 404
+        finally:
+            hls.set_manager(None)
+
+    def test_segments_stale_uses_cache(self, monkeypatch, tmp_path):
+        cid = "e" * 40
+        hls.clear_stale_log(cid)
+        segment = tmp_path / "seg000.ts"
+        segment.write_bytes(b"segment")
+        calls = []
+        real_listdir = hls.os.listdir
+
+        def listdir_spy(path):
+            calls.append(path)
+            return real_listdir(path)
+
+        monkeypatch.setattr(hls.os, "listdir", listdir_spy)
+
+        first = hls._segments_stale(str(tmp_path), cid)
+        second = hls._segments_stale(str(tmp_path), cid)
+
+        assert first == second
+        assert len(calls) == 1
+        hls.clear_stale_log(cid)
 
     def test_log_redaction_preserves_dict_shape(self):
         redacted = _redact_value({"event": "x", "url": "/play?token=abc", "nested": {"password": "pw"}})
@@ -332,13 +474,17 @@ class TestEnvironmentModule:
         client, _ = authed
         r = client.get("/api/environment")
         assert r.status_code == 200
-        keys = {item["key"] for item in r.get_json()["items"]}
+        items = r.get_json()["items"]
+        keys = {item["key"] for item in items}
         assert "ACESTREAM_PORT" in keys
+        assert "OPENACE_FFMPEG_ENABLED" in keys
         assert "ACESTREAM_IP" not in keys
         assert "WG_PRIVATE_KEY" not in keys
         assert "ProtonCountries" not in keys
         assert "TZ" not in keys
-        groups = {item["group"] for item in r.get_json()["items"]}
+        ffmpeg_enabled = next(item for item in items if item["key"] == "OPENACE_FFMPEG_ENABLED")
+        assert ffmpeg_enabled["value"] == "false"
+        groups = {item["group"] for item in items}
         assert "OpenAce" in groups
         assert "FFmpeg" in groups
         assert "HLS" in groups
@@ -391,3 +537,77 @@ class TestEnvironmentModule:
         body = by_domain.get_data(as_text=True)
         assert "https://openace.dominio2.tld/play/hls/" in body
         assert "openace.dominio1.tld/play/hls/" not in body
+
+
+class TestPeersPanel:
+    class Addr:
+        def __init__(self, ip, port):
+            self.ip = ip
+            self.port = port
+
+    class Conn:
+        def __init__(self, lip, lport, rip, rport, status="ESTABLISHED", pid=123):
+            self.laddr = TestPeersPanel.Addr(lip, lport)
+            self.raddr = TestPeersPanel.Addr(rip, rport)
+            self.status = status
+            self.pid = pid
+
+    class Proc:
+        def __init__(self, conns):
+            self.info = {
+                "pid": 123,
+                "name": "start-engine",
+                "exe": "/openace/start-engine",
+                "cmdline": ["/openace/start-engine", "--client-console", "--port", "6878", "--bind", "50000"],
+            }
+            self._conns = conns
+
+        def net_connections(self, kind="tcp"):
+            return self._conns
+
+    def test_os_peer_detection_filters_and_groups_public_process_connections(self, monkeypatch):
+        panel._peer_cache.clear()
+        panel._speed_cache.clear()
+        conns = [
+            self.Conn("10.2.0.2", 50000, "93.184.216.34", 40000),
+            self.Conn("10.2.0.2", 51000, "93.184.216.34", 40001),
+            self.Conn("127.0.0.1", 6878, "127.0.0.1", 46000),
+            self.Conn("10.2.0.2", 52000, "10.0.0.7", 40002),
+            self.Conn("10.2.0.2", 53000, "198.51.100.10", 40003),
+            self.Conn("10.2.0.2", 54000, "1.1.1.1", 40004, status="TIME_WAIT"),
+        ]
+        monkeypatch.setattr(panel.psutil, "process_iter", lambda attrs: [self.Proc(conns)])
+        monkeypatch.setattr(panel, "_get_socket_byte_counts", lambda: {})
+        monkeypatch.setattr(panel, "_get_peer_ip_info", lambda ip: {
+            "country": "US",
+            "city": "Example City",
+            "org": "AS15133 Example",
+            "timezone": "America/New_York",
+        })
+
+        peers = panel._get_acestream_peer_connections()
+
+        assert len(peers) == 1
+        peer = peers[0]
+        assert peer["ip"] == "93.184.216.34"
+        assert peer["source"] == "os_process"
+        assert peer["connections"] == 2
+        assert peer["direction"] == "mixed"
+        assert peer["remote_ports"] == [40000, 40001]
+        assert peer["local_ports"] == [50000, 51000]
+        assert peer["country"] == "US"
+        assert peer["org"] == "AS15133 Example"
+
+    def test_socket_rates_compute_download_and_upload_deltas(self, monkeypatch):
+        panel._speed_cache.clear()
+        key = ("10.2.0.2", 50000, "93.184.216.34", 40000)
+        panel._speed_cache[key] = {"sent": 1000, "recv": 2000, "ts": 100.0}
+        monkeypatch.setattr(panel.time, "time", lambda: 102.0)
+        monkeypatch.setattr(panel, "_get_socket_byte_counts", lambda: {
+            ("10.2.0.2:50000", "93.184.216.34:40000"): {"sent": 1400, "recv": 2600}
+        })
+
+        down, up = panel._socket_rates("10.2.0.2", 50000, "93.184.216.34", 40000)
+
+        assert down == 300
+        assert up == 200

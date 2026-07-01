@@ -19,6 +19,7 @@ MANIFEST_FILENAME = "playlist.m3u8"
 HLS_CLIENT_PARAM = "hls_client"
 STALE_SEGMENT_MAX_AGE_S = environment_store.get_int("OPENACE_HLS_STALE_SEGMENT_MAX_AGE_S")
 STALE_LOG_INTERVAL_S = 30
+_STALE_CACHE_TTL_S = 1.0
 HLS_LAZY = environment_store.get_bool("OPENACE_HLS_LAZY")
 SEGMENT_RE = re.compile(r'^[A-Za-z0-9_\-]+\.(?:ts|m3u8)$')
 _VALID_ID = re.compile(r'^[0-9a-fA-F]{40}$')
@@ -26,6 +27,7 @@ _HLS_CLIENT_RE = re.compile(r'^[0-9a-f]{32}$')
 
 _manager = None
 _stale_log_last = {}
+_stale_cache = {}
 _stale_log_lock = threading.Lock()
 
 
@@ -42,17 +44,24 @@ def set_manager(manager):
     _manager = manager
 
 
+def _ffmpeg_enabled():
+    return environment_store.get_bool("OPENACE_FFMPEG_ENABLED")
+
+
 def clear_stale_log(content_id):
     """Called by FFmpegManager when a stream is dropped/killed so the
     stale-log throttle dict does not retain entries for dead streams."""
     with _stale_log_lock:
         _stale_log_last.pop(content_id, None)
+        _stale_cache.pop(content_id, None)
 
 
 @hls_bp.route('/<content_id>')
 def hls_manifest(content_id):
     if not _VALID_ID.match(content_id):
         abort(400)
+    if not _ffmpeg_enabled():
+        return Response("FFmpeg disabled", status=503)
     if _manager is None:
         return Response("Stream manager not available", status=503)
 
@@ -80,11 +89,11 @@ def hls_manifest(content_id):
         # M4: in lazy mode the session was spawned MPEG-TS-only; the first HLS
         # request asks the manager to restart it with the HLS output enabled.
         if HLS_LAZY and _manager.request_hls(content_id):
-            log_event("info", "hls_lazy_requested", COMPONENT, content_id=content_id)
+            log_event("info", "hls_lazy_pending", COMPONENT, content_id=content_id)
         log_event("info", "hls_manifest_not_ready", COMPONENT, content_id=content_id)
         return Response("Stream buffering, retry", status=503, headers={"Retry-After": "1"})
 
-    stale, newest_segment, age = _segments_stale(out_dir)
+    stale, newest_segment, age = _segments_stale(out_dir, content_id)
     if stale:
         _log_stale_segments(content_id, newest_segment, age)
         _manager.drop(content_id)
@@ -108,6 +117,8 @@ def hls_manifest(content_id):
 def hls_segment(content_id, filename):
     if not _VALID_ID.match(content_id):
         abort(400)
+    if not _ffmpeg_enabled():
+        return Response("FFmpeg disabled", status=503)
     if _manager is None:
         return Response("Stream manager not available", status=503)
     if not SEGMENT_RE.match(filename):
@@ -124,8 +135,23 @@ def hls_segment(content_id, filename):
     out_dir = _manager.output_dir(content_id)
     path = os.path.join(out_dir, filename)
     if not os.path.exists(path):
+        if _manager.is_alive(content_id):
+            log_event("info", "hls_segment_not_ready", COMPONENT,
+                      content_id=content_id, filename=filename)
+            return Response("Segment not ready, retry", status=503,
+                            headers={"Retry-After": "1"})
         _log_missing_segment(out_dir, content_id, filename)
         abort(404)
+    if not _manager.is_alive(content_id):
+        log_event("warning", "hls_segment_ffmpeg_dead", COMPONENT,
+                  content_id=content_id, filename=filename)
+        _manager.drop(content_id)
+        return Response("Stream stale, retry", status=503)
+    stale, newest_segment, age = _segments_stale(out_dir, content_id)
+    if stale:
+        _log_stale_segments(content_id, newest_segment, age)
+        _manager.drop(content_id)
+        return Response("Stream stale, retry", status=503)
     _manager.touch(content_id)
     response = send_from_directory(out_dir, filename, mimetype="video/MP2T" if filename.endswith(".ts") else None)
     return _apply_streaming_headers(response)
@@ -171,14 +197,51 @@ def _log_missing_segment(out_dir: str, content_id: str, filename: str):
     )
 
 
-def _segments_stale(out_dir: str):
+def _segments_stale(out_dir: str, content_id: str | None = None):
+    now = time.monotonic()
+    if content_id is not None:
+        with _stale_log_lock:
+            cached = _stale_cache.get(content_id)
+            if cached and cached[0] == out_dir and now - cached[4] < _STALE_CACHE_TTL_S:
+                return cached[1], cached[2], cached[3]
     manifest_path = os.path.join(out_dir, MANIFEST_FILENAME)
+    newest_name = None
+    newest_mtime = None
+    try:
+        for name in os.listdir(out_dir):
+            if not name.endswith(".ts"):
+                continue
+            path = os.path.join(out_dir, name)
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if newest_mtime is None or mtime > newest_mtime:
+                newest_name = name
+                newest_mtime = mtime
+    except OSError:
+        pass
+    if newest_mtime is not None:
+        age = time.time() - newest_mtime
+        result = (age > STALE_SEGMENT_MAX_AGE_S, newest_name, age)
+        if content_id is not None:
+            with _stale_log_lock:
+                _stale_cache[content_id] = (out_dir, result[0], result[1], result[2], now)
+        return result
     try:
         mtime = os.path.getmtime(manifest_path)
     except OSError:
-        return False, None, None
+        result = (False, None, None)
+        if content_id is not None:
+            with _stale_log_lock:
+                _stale_cache[content_id] = (out_dir, result[0], result[1], result[2], now)
+        return result
     age = time.time() - mtime
-    return age > STALE_SEGMENT_MAX_AGE_S, MANIFEST_FILENAME, age
+    result = (age > STALE_SEGMENT_MAX_AGE_S, MANIFEST_FILENAME, age)
+    if content_id is not None:
+        with _stale_log_lock:
+            _stale_cache[content_id] = (out_dir, result[0], result[1], result[2], now)
+    return result
 
 
 def _log_stale_segments(content_id: str, newest_segment: str | None, age: float | None):

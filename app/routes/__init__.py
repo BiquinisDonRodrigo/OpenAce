@@ -11,6 +11,7 @@ from app.routes.plugins_api import plugins_api_bp
 from app.routes.auth import auth_bp
 from app.routes.setup import setup_bp
 from app.routes.environment import environment_bp
+from app.utils import environment_store
 from app.utils.ffmpeg_manager import FFmpegManager
 
 
@@ -20,7 +21,7 @@ def _is_werkzeug_reloader_parent(app):
 
 def register_blueprints(app):
     manager = None
-    if not _is_werkzeug_reloader_parent(app):
+    if environment_store.get_bool("OPENACE_FFMPEG_ENABLED") and not _is_werkzeug_reloader_parent(app):
         manager = FFmpegManager(
             acestream_host=app.config.get("ACESTREAM_HOST", "127.0.0.1"),
             acestream_port=str(app.config.get("ACESTREAM_PORT", "6878")),

@@ -2,8 +2,8 @@
 
 OpenAce genera listas M3U compatibles con cualquier reproductor IPTV. Cada plugin proporciona dos formatos de playlist:
 
-- **MPEG-TS**: `http://<host>:8888/<plugin>/mpegts.m3u` — Salida MPEG-TS generada por FFmpeg con codec copy
-- **HLS**: `http://<host>:8888/<plugin>/hls.m3u` — Segmentos HLS bajo demanda via FFmpeg
+- **MPEG-TS**: `http://<host>:8888/<plugin>/mpegts.m3u` — URLs OpenAce `/play/mpegts/...`; por defecto proxya directo desde AceStream sin exponer el puerto del motor
+- **HLS**: `http://<host>:8888/<plugin>/hls.m3u` — Segmentos HLS bajo demanda via FFmpeg; requiere `OPENACE_FFMPEG_ENABLED=true`
 
 ## Autenticacion en reproductores
 
@@ -128,7 +128,8 @@ Misma configuracion que la version movil.
 
 ## Notas sobre rendimiento
 
-- Cada stream MPEG-TS/HLS activo consume ancho de banda y un proceso FFmpeg con codec copy.
+- Con `OPENACE_FFMPEG_ENABLED=false` (default), MPEG-TS no arranca FFmpeg: OpenAce mantiene la autenticacion/token y retransmite el stream directo del motor.
+- Con `OPENACE_FFMPEG_ENABLED=true`, cada stream MPEG-TS/HLS activo consume ancho de banda y un proceso FFmpeg con codec copy.
 - HLS anade coste de segmentacion y mas latencia inicial.
 - Los procesos FFmpeg inactivos se terminan automaticamente tras `OPENACE_IDLE_TIMEOUT_S` segundos sin peticiones (180 por defecto).
 - El numero maximo de streams simultaneos se controla con `OPENACE_MAX_STREAMS` (32 por defecto).

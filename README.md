@@ -23,7 +23,7 @@ OpenAce es un **proxy HTTP** escrito en **Flask + Gunicorn (gevent)** que envuel
 - **Asistente de configuracion inicial** — wizard de 4 pasos al primer acceso. Soporta auto-setup por variables de entorno.
 - **Autenticacion multiusuario** — tres roles (admin/user/viewer), sesiones, tokens API (Bearer, URL, Basic Auth) y rate limiting.
 - **Plugins M3U dinamicos** — fuentes M3U gestionadas desde la web o API REST, con refresco automatico.
-- **Streaming MPEG-TS/HLS bajo demanda** — FFmpeg genera salidas MPEG-TS y HLS con codec copy.
+- **Streaming MPEG-TS bajo demanda** — por defecto OpenAce mantiene las URLs `/play/mpegts/...` y proxya directo desde AceStream; FFmpeg se puede activar para MPEG-TS/HLS con codec copy.
 - **Reaper configurable** — cierre automatico de streams inactivos con `OPENACE_IDLE_TIMEOUT_S` (180s por defecto).
 - **Soporte IPFS/IPNS** — resolucion via nodo Kubo local.
 - **Import/Export** — plugins exportables como JSON, importables desde archivo o URL.

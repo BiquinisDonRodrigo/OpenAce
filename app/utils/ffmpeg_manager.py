@@ -10,7 +10,10 @@ import threading
 import time
 import uuid
 
-from app.utils.acestream import negotiate_stream, read_stat, stop_stream
+from app.utils.acestream import (
+    negotiate_stream, read_stat, stop_stream, READY_TIMEOUT_S,
+    REQUEST_TIMEOUT_S, SESSION_RETRIES, SESSION_BACKOFF_S,
+)
 from app.utils import environment_store, stream_registry
 from app.utils.logging_utils import log_event
 
@@ -33,7 +36,19 @@ CHUNK_SIZE = environment_store.get_int("OPENACE_CHUNK_SIZE")
 QUEUE_MAX = environment_store.get_int("OPENACE_QUEUE_MAX")
 PIPE_BUFFER_SIZE = environment_store.get_int("OPENACE_PIPE_BUFFER_SIZE")
 ITERATE_TIMEOUT_S = environment_store.get_int("OPENACE_ITERATE_TIMEOUT_S")
-START_WAIT_TIMEOUT_S = 75
+
+
+def _session_open_worst_case_s():
+    backoff = sum(
+        min(SESSION_BACKOFF_S * (2 ** (attempt - 1)), 8.0)
+        for attempt in range(1, SESSION_RETRIES)
+    )
+    return SESSION_RETRIES * REQUEST_TIMEOUT_S + backoff
+
+
+START_WAIT_TIMEOUT_S = int(READY_TIMEOUT_S + _session_open_worst_case_s() + 5)
+FFMPEG_START_PROBE_S = 3.0
+RESTART_RESET_MIN_UPTIME_S = 30.0
 FFMPEG_RW_TIMEOUT_US = environment_store.get_str("OPENACE_FFMPEG_RW_TIMEOUT_US")
 MAX_RESTART_ATTEMPTS = environment_store.get_int("OPENACE_FFMPEG_RESTARTS")
 RESTART_BACKOFF_S = environment_store.get_float("OPENACE_FFMPEG_RESTART_BACKOFF_S")
@@ -187,6 +202,7 @@ class _StreamSession:
         "sub_lock", "closed", "restarting", "bytes_total", "bytes_window", "last_progress",
         "dropped_clients", "restart_attempts", "_subscriber_count", "is_live",
         "queue_max", "ts_residue", "ts_synced", "dropped_lead_bytes", "hls_requested",
+        "process_started_at", "process_start_bytes_total",
     )
 
     def __init__(self, process, output_dir, command_url=None, playback_url=None, is_live=None, stat_url=None):
@@ -196,6 +212,7 @@ class _StreamSession:
         self.playback_url = playback_url
         self.stat_url = stat_url
         self.is_live = is_live
+        self.process_started_at = time.monotonic()
         self.last_request = time.monotonic()
         self.lock = threading.Lock()
         # Bounded ring buffer drained continuously by a daemon thread; keeps the
@@ -208,6 +225,7 @@ class _StreamSession:
         self.closed = False
         self.restarting = False
         self.bytes_total = 0
+        self.process_start_bytes_total = 0
         self.bytes_window = 0
         self.last_progress = time.monotonic()
         self.dropped_clients = 0
@@ -320,7 +338,7 @@ class _StreamSession:
                 content_id=content_id,
                 trimmed=trimmed,
                 clients=len(subscribers),
-                queue_max=QUEUE_MAX,
+                queue_max=self.queue_max,
                 chunk_size=CHUNK_SIZE,
             )
 
@@ -334,7 +352,7 @@ class _StreamSession:
                             log_event(
                                 "warning", "ffmpeg_mpegts_sentinel_failed", COMPONENT,
                                 content_id=content_id,
-                                queue_max=QUEUE_MAX,
+                                queue_max=self.queue_max,
                             )
                 self._subscriber_count = len(self.subscribers)
             log_event(
@@ -342,12 +360,14 @@ class _StreamSession:
                 content_id=content_id,
                 dropped=len(stale),
                 clients=len(subscribers) - len(stale),
-                queue_max=QUEUE_MAX,
+                queue_max=self.queue_max,
                 chunk_size=CHUNK_SIZE,
             )
 
     def close_subscribers(self):
         with self.sub_lock:
+            if self.closed:
+                return
             self.closed = True
             subscribers = list(self.subscribers)
             self.subscribers.clear()
@@ -421,10 +441,10 @@ class FFmpegManager:
 
     def _read_cached_stat(self, content_id, now):
         """Read engine stat for a stream, with a short cache to avoid hammering."""
-        cached = self._stat_cache.get(content_id)
-        if cached and now - cached["ts"] < self._stat_cache_ttl:
-            return cached["data"]
         with self._lock:
+            cached = self._stat_cache.get(content_id)
+            if cached and now - cached["ts"] < self._stat_cache_ttl:
+                return cached["data"]
             sess = self._streams.get(content_id)
             stat_url = sess.stat_url if sess else None
         stat = None
@@ -435,7 +455,8 @@ class FFmpegManager:
                                  log_context={"content_id": content_id})
             except Exception:
                 stat = None
-        self._stat_cache[content_id] = {"data": stat, "ts": now}
+        with self._lock:
+            self._stat_cache[content_id] = {"data": stat, "ts": now}
         return stat
 
     def ensure_stream(self, content_id: str) -> str | None:
@@ -494,10 +515,11 @@ class FFmpegManager:
                 return None
 
             # Cache for fast restarts.
-            self._session_cache[content_id] = {
-                "data": session_info,
-                "ts": time.monotonic(),
-            }
+            with self._lock:
+                self._session_cache[content_id] = {
+                    "data": session_info,
+                    "ts": time.monotonic(),
+                }
 
             out_dir = None
             stale_command_url = None
@@ -533,6 +555,16 @@ class FFmpegManager:
             if reserve_spawn:
                 try:
                     spawned_session = self._spawn(content_id, session_info)
+                    if (spawned_session is not None
+                            and session_info.get("direct_getstream")
+                            and not self._direct_getstream_produced_data(
+                                spawned_session, content_id)):
+                        self._terminate_process(
+                            spawned_session.process, content_id,
+                            "direct_getstream_probe_failed")
+                        spawned_session.close_subscribers()
+                        shutil.rmtree(spawned_session.output_dir, ignore_errors=True)
+                        spawned_session = None
                 except Exception:
                     spawn_failed = True
                 with self._lock:
@@ -846,6 +878,58 @@ class FFmpegManager:
                           content_id=content_id, requested=PIPE_BUFFER_SIZE, error=str(exc))
         return proc
 
+    def _process_survived_probe(self, process, content_id: str, event: str, **payload) -> bool:
+        deadline = time.monotonic() + FFMPEG_START_PROBE_S
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                log_event("warning", event, COMPONENT,
+                          content_id=content_id, returncode=process.returncode,
+                          **payload)
+                return False
+            time.sleep(0.1)
+        if process.poll() is not None:
+            log_event("warning", event, COMPONENT,
+                      content_id=content_id, returncode=process.returncode,
+                      **payload)
+            return False
+        return True
+
+    def _process_survived_start_probe(self, process, content_id: str, attempt: int) -> bool:
+        return self._process_survived_probe(
+            process, content_id, "ffmpeg_fast_restart_failed", attempt=attempt
+        )
+
+    def _direct_getstream_produced_data(self, session: "_StreamSession", content_id: str) -> bool:
+        q = session.subscribe()
+        if q is None:
+            log_event("warning", "ffmpeg_direct_getstream_probe_closed", COMPONENT,
+                      content_id=content_id)
+            return False
+        deadline = time.monotonic() + FFMPEG_START_PROBE_S
+        try:
+            while True:
+                if session.process.poll() is not None:
+                    log_event("warning", "ffmpeg_direct_getstream_probe_failed", COMPONENT,
+                              content_id=content_id, returncode=session.process.returncode)
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    log_event("warning", "ffmpeg_direct_getstream_probe_timeout", COMPONENT,
+                              content_id=content_id)
+                    return False
+                try:
+                    item = q.get(timeout=min(0.2, remaining))
+                except Empty:
+                    continue
+                if item is _SENTINEL or item is _ERROR_SENTINEL:
+                    log_event("warning", "ffmpeg_direct_getstream_probe_closed", COMPONENT,
+                              content_id=content_id)
+                    return False
+                if item:
+                    return True
+        finally:
+            session.unsubscribe(q)
+
     def _spawn(self, content_id: str, session_info: dict) -> "_StreamSession | None":
         out_dir = self._new_output_dir(content_id)
         # M4: in lazy mode the initial spawn only produces MPEG-TS; HLS is added
@@ -858,13 +942,21 @@ class FFmpegManager:
                   queue_max=session_info.get("is_live") and QUEUE_MAX_LIVE or QUEUE_MAX_VOD,
                   pipe_buffer=PIPE_BUFFER_SIZE, hls_lazy=HLS_LAZY, ts_align=TS_ALIGN,
                   stat_tuning=FFMPEG_STAT_TUNING)
-        session = _StreamSession(process=process, output_dir=out_dir,
-                                 command_url=session_info.get("command_url"),
-                                 playback_url=session_info.get("playback_url"),
-                                 is_live=session_info.get("is_live"),
-                                 stat_url=session_info.get("stat_url"))
-        self._start_stdout_drain(content_id, session)
-        self._start_stderr_drain(session)
+        session = None
+        try:
+            session = _StreamSession(process=process, output_dir=out_dir,
+                                     command_url=session_info.get("command_url"),
+                                     playback_url=session_info.get("playback_url"),
+                                     is_live=session_info.get("is_live"),
+                                     stat_url=session_info.get("stat_url"))
+            self._start_stdout_drain(content_id, session)
+            self._start_stderr_drain(session)
+        except Exception:
+            self._terminate_process(process, content_id, "spawn_drain_failed")
+            if session is not None:
+                session.close_subscribers()
+            shutil.rmtree(out_dir, ignore_errors=True)
+            raise
         return session
 
     def _restart_session(self, content_id: str, session: "_StreamSession"):
@@ -891,20 +983,17 @@ class FFmpegManager:
         session_info = None
         process = None
         # Try session cache first (avoids a full negotiate round-trip).
-        cached = self._session_cache.get(content_id)
+        with self._lock:
+            cached = self._session_cache.get(content_id)
         if cached and time.monotonic() - cached["ts"] < self._session_cache_ttl:
             fast_info = cached["data"]
             process = self._popen_ffmpeg(content_id, fast_info, include_hls=include_hls)
             if process is not None:
-                time.sleep(1)
-                if process.poll() is None:
+                if self._process_survived_start_probe(process, content_id, attempt):
                     session_info = fast_info
                     log_event("info", "ffmpeg_fast_restart_done", COMPONENT,
                               content_id=content_id, attempt=attempt, source="cache")
                 else:
-                    log_event("warning", "ffmpeg_fast_restart_failed", COMPONENT,
-                              content_id=content_id, attempt=attempt,
-                              returncode=process.returncode)
                     process = None
         elif session.playback_url:
             fast_info = {"playback_url": session.playback_url,
@@ -913,15 +1002,11 @@ class FFmpegManager:
                          "is_live": session.is_live}
             process = self._popen_ffmpeg(content_id, fast_info, include_hls=include_hls)
             if process is not None:
-                time.sleep(1)
-                if process.poll() is None:
+                if self._process_survived_start_probe(process, content_id, attempt):
                     session_info = fast_info
                     log_event("info", "ffmpeg_fast_restart_done", COMPONENT,
                               content_id=content_id, attempt=attempt)
                 else:
-                    log_event("warning", "ffmpeg_fast_restart_failed", COMPONENT,
-                              content_id=content_id, attempt=attempt,
-                              returncode=process.returncode)
                     process = None
 
         if process is None:
@@ -945,6 +1030,12 @@ class FFmpegManager:
         old_stderr_thread = session.stderr_thread
         old_stdout = old_process.stdout
         old_stderr = old_process.stderr
+        old_uptime = time.monotonic() - session.process_started_at
+        old_bytes_produced = session.bytes_total - session.process_start_bytes_total
+        reset_restart_attempts = (
+            old_uptime >= RESTART_RESET_MIN_UPTIME_S
+            and old_bytes_produced > 0
+        )
         stderr_bytes = b"".join(session.stderr_tail)
         if stderr_bytes:
             log_event("warning", "ffmpeg_restart_stderr", COMPONENT,
@@ -960,11 +1051,15 @@ class FFmpegManager:
                 session.restarting = False
                 return False
             session.process = process
+            session.process_started_at = time.monotonic()
+            session.process_start_bytes_total = session.bytes_total
             session.output_dir = getattr(process, "_openace_output_dir", session.output_dir)
             session.command_url = session_info.get("command_url")
             session.playback_url = session_info.get("playback_url")
             session.stderr_tail.clear()
             session.restarting = False
+            if reset_restart_attempts:
+                session.restart_attempts = 0
             session.touch()
         self._start_stdout_drain(content_id, session)
         self._start_stderr_drain(session)

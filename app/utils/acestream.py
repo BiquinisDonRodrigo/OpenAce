@@ -46,6 +46,8 @@ def negotiate_stream(engine_url, content_id, *, ready_timeout=READY_TIMEOUT_S,
     info = _open_session(engine_url, content_id, request_timeout, component, log_context)
     if info is None:
         return None
+    if isinstance(info, dict):
+        return info
     playback_url, stat_url, command_url, is_live = info
 
     deadline = time.monotonic() + ready_timeout
@@ -141,6 +143,9 @@ def _open_session(engine_url, content_id, request_timeout, component, log_contex
         if payload.get("error"):
             log_event("warning", "acestream_session_error", component,
                       error=payload["error"], **log_context)
+            if payload["error"] == "failed to load content":
+                return _direct_getstream_info(engine_url, content_id, component, log_context,
+                                              reason=payload["error"])
             return None
         response = payload.get("response") or {}
         playback_url = response.get("playback_url")
@@ -153,7 +158,8 @@ def _open_session(engine_url, content_id, request_timeout, component, log_contex
             if command_url:
                 stop_stream(command_url, request_timeout=request_timeout,
                             component=component, log_context=log_context)
-            return None
+            return _direct_getstream_info(engine_url, content_id, component, log_context,
+                                          reason="missing_urls")
         log_event("info", "acestream_session_opened", component,
                   is_live=is_live, **log_context)
         return playback_url, stat_url, command_url, is_live
@@ -161,6 +167,19 @@ def _open_session(engine_url, content_id, request_timeout, component, log_contex
     log_event("error", "acestream_session_unavailable", component,
               attempts=SESSION_RETRIES, last_error=last_error, **log_context)
     return None
+
+
+def _direct_getstream_info(engine_url, content_id, component, log_context, *, reason):
+    log_event("warning", "acestream_direct_getstream_fallback", component,
+              reason=reason, **log_context)
+    return {
+        "playback_url": f"{engine_url}/ace/getstream?id={content_id}",
+        "stat_url": None,
+        "command_url": None,
+        "is_live": True,
+        "stat_hints": {},
+        "direct_getstream": True,
+    }
 
 
 def read_stat(stat_url, *, request_timeout=REQUEST_TIMEOUT_S, component=COMPONENT, log_context=None):

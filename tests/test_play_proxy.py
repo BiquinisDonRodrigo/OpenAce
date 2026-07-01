@@ -3,6 +3,7 @@ Range handling (M7), and the 503 paths."""
 import queue
 
 from app.routes import play
+from app.utils import environment_store
 from app.utils.ffmpeg_manager import _SENTINEL
 
 
@@ -48,11 +49,25 @@ class _FakeManager:
         self.unsubscribed += 1
 
 
+class _FakeUpstreamResponse:
+    def __init__(self, chunks=()):
+        self.status_code = 200
+        self.chunks = list(chunks)
+        self.closed = False
+
+    def iter_content(self, chunk_size=1):
+        yield from self.chunks
+
+    def close(self):
+        self.closed = True
+
+
 import pytest
 
 
 @pytest.fixture
 def fake_manager(monkeypatch):
+    environment_store.update_settings({"OPENACE_FFMPEG_ENABLED": "true"})
     mgr = _FakeManager(chunks=[b"TS-DATA"])
     play.set_manager(mgr)
     yield mgr
@@ -67,6 +82,24 @@ class TestContentIdValidation:
 
 
 class TestContentTypeM1:
+    def test_default_mode_proxies_directly_without_ffmpeg(self, authed, monkeypatch):
+        client, _ = authed
+        upstream = _FakeUpstreamResponse(chunks=[b"ENGINE-TS"])
+        opened = []
+
+        def fake_get(url, stream, timeout):
+            opened.append((url, stream, timeout))
+            return upstream
+
+        monkeypatch.setattr(play.upstream_session, "get", fake_get)
+
+        r = client.get(f"/play/mpegts/{VALID_ID}")
+        assert r.status_code == 200
+        assert r.headers["Content-Type"] == "video/MP2T"
+        assert b"ENGINE-TS" in r.data
+        assert upstream.closed is True
+        assert opened == [(f"http://127.0.0.1:6878/ace/getstream?id={VALID_ID}", True, (5, None))]
+
     def test_get_returns_canonical_mp2t(self, authed, fake_manager):
         client, _ = authed
         r = client.get(f"/play/mpegts/{VALID_ID}")

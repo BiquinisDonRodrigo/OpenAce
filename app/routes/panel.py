@@ -142,38 +142,170 @@ def _get_socket_byte_counts() -> dict:
     return result
 
 
+def _looks_like_acestream_process(info: dict) -> bool:
+    name = (info.get("name") or "").lower()
+    exe = (info.get("exe") or "").lower()
+    cmdline = " ".join(str(x) for x in (info.get("cmdline") or [])).lower()
+    haystack = " ".join((name, exe, cmdline))
+    return any(token in haystack for token in ("start-engine", "acestream", "ace_engine"))
+
+
+def _extract_bind_ports(cmdline: list) -> set:
+    ports = set()
+    for idx, part in enumerate(cmdline or []):
+        if part == "--bind" and idx + 1 < len(cmdline):
+            try:
+                ports.add(int(cmdline[idx + 1]))
+            except (TypeError, ValueError):
+                pass
+        elif isinstance(part, str) and part.startswith("--bind="):
+            try:
+                ports.add(int(part.split("=", 1)[1]))
+            except (TypeError, ValueError):
+                pass
+    return ports
+
+
+def _endpoint_keys(ip: str, port: int) -> list:
+    # ``ss`` prints IPv6 endpoints bracketed but IPv4 as ip:port.
+    return [f"{ip}:{port}", f"[{ip}]:{port}"]
+
+
+def _socket_rates(local_ip: str, local_port: int, remote_ip: str, remote_port: int) -> tuple:
+    counts = _get_socket_byte_counts()
+    current = None
+    for lk in _endpoint_keys(local_ip, local_port):
+        for rk in _endpoint_keys(remote_ip, remote_port):
+            current = counts.get((lk, rk))
+            if current is not None:
+                break
+        if current is not None:
+            break
+    if current is None:
+        return None, None
+
+    key = (local_ip, int(local_port), remote_ip, int(remote_port))
+    now = time.time()
+    with _speed_cache_lock:
+        previous = _speed_cache.get(key)
+        _speed_cache[key] = {"sent": current.get("sent", 0), "recv": current.get("recv", 0), "ts": now}
+    if not previous:
+        return None, None
+
+    dt = now - previous.get("ts", now)
+    if dt <= 0:
+        return None, None
+    sent_delta = current.get("sent", 0) - previous.get("sent", 0)
+    recv_delta = current.get("recv", 0) - previous.get("recv", 0)
+    if sent_delta < 0 or recv_delta < 0:
+        return None, None
+    return int(recv_delta / dt), int(sent_delta / dt)
+
+
+def _get_acestream_processes() -> list:
+    processes = []
+    try:
+        iterator = psutil.process_iter(["pid", "name", "exe", "cmdline"])
+        for proc in iterator:
+            info = getattr(proc, "info", {}) or {}
+            if _looks_like_acestream_process(info):
+                processes.append((proc, info, _extract_bind_ports(info.get("cmdline") or [])))
+    except Exception:
+        return processes
+    return processes
+
+
 def _get_acestream_peer_connections() -> list:
-    """Return real P2P peers from the engine's ``/app/monitor`` endpoint.
+    """Return P2P peers by inspecting TCP sockets owned by AceStream.
 
-    The previous implementation enumerated the engine process' TCP sockets via
-    ``psutil``. Without an active stream that only surfaced the loopback
-    control connections between OpenAce and the engine (127.0.0.1), which
-    were painted as fake P2P peers with all geo fields in '—'.  The engine
-    exposes the genuine P2P peers (with real IPs and per-peer rates) via the
-    ``/app/monitor`` endpoint on the LM port, so we use that instead.
+    ``/app/monitor`` may expose only aggregate counts while leaving
+    ``connected_peers[]`` empty.  This view intentionally uses the operating
+    system as the source of truth: established TCP connections of the
+    AceStream process, excluding loopback/private/control traffic.
     """
-    from app.utils.acestream_api import AceStreamAPI
+    processes = _get_acestream_processes()
+    if not processes:
+        return []
 
-    host = current_app.config.get("ACESTREAM_HOST", "127.0.0.1")
-    port = str(current_app.config.get("ACESTREAM_PORT", "6878"))
-    api = AceStreamAPI(host, port)
+    raw_peers = {}
+    seen_sockets = set()
+    pids = {info.get("pid") for _, info, _ in processes if info.get("pid") is not None}
 
-    monitor = api.get_monitor()
-    raw_peers = (monitor or {}).get("connected_peers") or []
+    def add_conn(conn, bind_ports):
+        if getattr(conn, "status", None) != "ESTABLISHED" or not getattr(conn, "raddr", None):
+            return
+        try:
+            rip = conn.raddr.ip
+            rport = int(conn.raddr.port)
+            lip = conn.laddr.ip
+            lport = int(conn.laddr.port)
+            remote_ip = ipaddress.ip_address(rip)
+        except (AttributeError, TypeError, ValueError):
+            return
+        if not remote_ip.is_global:
+            return
+
+        socket_key = (lip, lport, rip, rport)
+        if socket_key in seen_sockets:
+            return
+        seen_sockets.add(socket_key)
+
+        down, up = _socket_rates(lip, lport, rip, rport)
+        direction = "incoming" if lport in bind_ports else "outgoing"
+        peer = raw_peers.setdefault(rip, {
+            "peer_id": f"os:{rip}",
+            "ip": rip,
+            "external_port": rport,
+            "remote_ports": set(),
+            "local_ports": set(),
+            "download_speed": 0,
+            "upload_speed": 0,
+            "has_download_speed": False,
+            "has_upload_speed": False,
+            "state": "ESTABLISHED",
+            "direction": direction,
+            "source": "os_process",
+            "connections": 0,
+        })
+        peer["connections"] += 1
+        peer["remote_ports"].add(rport)
+        peer["local_ports"].add(lport)
+        if peer["direction"] != direction:
+            peer["direction"] = "mixed"
+        if down is not None:
+            peer["download_speed"] += down
+            peer["has_download_speed"] = True
+        if up is not None:
+            peer["upload_speed"] += up
+            peer["has_upload_speed"] = True
+
+    for proc, _info, bind_ports in processes:
+        try:
+            if hasattr(proc, "net_connections"):
+                conns = proc.net_connections(kind="tcp")
+            else:  # pragma: no cover - old psutil compatibility
+                conns = proc.connections(kind="tcp")
+        except (psutil.AccessDenied, psutil.NoSuchProcess, PermissionError):
+            continue
+        for conn in conns:
+            add_conn(conn, bind_ports)
+
+    # Best-effort fallback for environments where Process.net_connections is
+    # restricted but global net_connections still exposes a pid field.
+    if not raw_peers and pids:
+        try:
+            bind_ports_by_pid = {info.get("pid"): bind_ports for _, info, bind_ports in processes}
+            for conn in psutil.net_connections(kind="tcp"):
+                if getattr(conn, "pid", None) in pids:
+                    add_conn(conn, bind_ports_by_pid.get(conn.pid, set()))
+        except (psutil.AccessDenied, PermissionError):
+            pass
+
     if not raw_peers:
         return []
 
     # Collect unique public IPs for geo enrichment (capped to avoid bursts).
-    seen_ips: set = set()
-    for p in raw_peers:
-        ip = (p.get("ip") or "").strip()
-        if not ip:
-            continue
-        try:
-            if ipaddress.ip_address(ip).is_global:
-                seen_ips.add(ip)
-        except ValueError:
-            continue
+    seen_ips = set(raw_peers.keys())
 
     ip_info_map: dict = {}
     lookups_left = MAX_GEO_LOOKUPS_PER_REFRESH
@@ -188,18 +320,20 @@ def _get_acestream_peer_connections() -> list:
             ip_info_map[ip] = {}
 
     peers = []
-    for p in raw_peers:
-        ip = (p.get("ip") or "").strip()
+    for ip, p in raw_peers.items():
         geo = ip_info_map.get(ip, {}) if ip else {}
         peers.append({
-            "peer_id": p.get("id") or "—",
-            "ip": ip or "—",
-            "external_port": p.get("external_port"),
-            "download_speed": p.get("downrate"),
-            "upload_speed": p.get("uprate"),
-            "dedicated_download_rate": p.get("dedicated_download_rate"),
-            "channel_download_rate": p.get("channel_download_rate"),
-            "state": "ESTABLISHED",
+            "peer_id": p["peer_id"],
+            "ip": ip,
+            "external_port": p["external_port"],
+            "remote_ports": sorted(p["remote_ports"]),
+            "local_ports": sorted(p["local_ports"]),
+            "download_speed": p["download_speed"] if p["has_download_speed"] else None,
+            "upload_speed": p["upload_speed"] if p["has_upload_speed"] else None,
+            "state": p["state"],
+            "direction": p["direction"],
+            "source": p["source"],
+            "connections": p["connections"],
             "org": geo.get("org", "—"),
             "city": geo.get("city", "—"),
             "country": geo.get("country", "—"),
@@ -291,6 +425,11 @@ def _get_connections():
             elif rport == 6878:
                 outgoing_ace.append(f"{conn.laddr.ip}:{lport} → {rip}:{rport}")
             else:
+                try:
+                    if not ipaddress.ip_address(rip).is_global:
+                        continue
+                except ValueError:
+                    continue
                 outgoing_ext.append(f"{conn.laddr.ip}:{lport} → {rip}:{rport}")
     except (psutil.AccessDenied, PermissionError):
         with _connections_cache_lock:
@@ -632,6 +771,14 @@ function fmt_speed(bps) {
   return (bps / 1048576).toFixed(2) + ' MB/s';
 }
 
+function fmt_bytes(bytes) {
+  if (bytes == null) return '—';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(2) + ' MB';
+  return (bytes / 1073741824).toFixed(2) + ' GB';
+}
+
 function fmt_percent(v) {
   if (v === null || v === undefined || v === '' || v === '?') return null;
   return String(v).endsWith('%') ? String(v) : String(v) + '%';
@@ -775,8 +922,8 @@ function render(data) {
     ${engineRow('IP externa', esc(e.external_ip))}
     ${engineRow('↓ Bajada', fmt_speed(e.download_speed))}
     ${engineRow('↑ Subida', fmt_speed(e.upload_speed))}
-    ${engineRow('Descargado', fmt_speed(e.downloaded))}
-    ${engineRow('Subido', fmt_speed(e.uploaded))}
+    ${engineRow('Descargado', fmt_bytes(e.downloaded))}
+    ${engineRow('Subido', fmt_bytes(e.uploaded))}
     ${engineRow('Peers máx.', e.max_peers)}
     ${engineRow('Peers activos', e.connected_peers_count)}
     ${engineRow('Slots subida', e.upload_slots)}
@@ -811,8 +958,8 @@ function render(data) {
   document.getElementById('hdr-engine').innerHTML = e.up ? badge('ONLINE','green') : badge('OFFLINE','red');
   document.getElementById('hdr-streams').textContent = mergedStreams.length;
   document.getElementById('hdr-clients').textContent = conns.incoming.length;
-  document.getElementById('hdr-down').textContent = fmt_speed(peers.reduce((s,p) => s + (p.download_speed || 0), 0));
-  document.getElementById('hdr-up').textContent = fmt_speed(peers.reduce((s,p) => s + (p.upload_speed || 0), 0));
+  document.getElementById('hdr-down').textContent = fmt_speed(e.download_speed);
+  document.getElementById('hdr-up').textContent = fmt_speed(e.upload_speed);
 
   // Connection lists
   function renderList(id, items, emptyMsg) {
@@ -851,7 +998,7 @@ function render(data) {
   // Engine peers (real P2P peers from /app/monitor)
   const ep = sortRows(data.engine_peers, SORTS.peers);
   if (!ep.length) {
-    document.getElementById('engine-peers-content').innerHTML = '<div class="empty">No hay peers P2P activos — reproduce un stream para verlos.</div>';
+    document.getElementById('engine-peers-content').innerHTML = '<div class="empty">No hay conexiones P2P externas detectadas en el proceso AceStream.</div>';
   } else {
     document.getElementById('engine-peers-content').innerHTML = `
       <div class="table-wrap">
@@ -859,6 +1006,8 @@ function render(data) {
         <thead><tr>
           ${sortableTh('peers','ip','text','IP','width:160px')}
           ${sortableTh('peers','external_port','num','Puerto','width:80px')}
+          ${sortableTh('peers','direction','text','Dir.','width:80px')}
+          ${sortableTh('peers','connections','num','Conns.','width:70px')}
           ${sortableTh('peers','country','text','País','width:60px')}
           ${sortableTh('peers','city','text','Ciudad','width:100px')}
           ${sortableTh('peers','org','text','Org / ISP')}
@@ -868,7 +1017,9 @@ function render(data) {
         <tbody>${ep.map(p => `
           <tr>
             <td class="mono" style="font-size:11px" title="${esc(p.peer_id)}">${esc(p.ip)}</td>
-            <td class="mono" style="font-size:11px">${esc(p.external_port || '—')}</td>
+            <td class="mono" style="font-size:11px" title="Remotos: ${esc((p.remote_ports||[]).join(', '))} · Locales: ${esc((p.local_ports||[]).join(', '))}">${esc(p.external_port || '—')}</td>
+            <td style="font-size:12px">${esc(p.direction || '—')}</td>
+            <td class="mono" style="font-size:11px">${esc(p.connections || 1)}</td>
             <td style="font-size:12px">${esc(p.country)}</td>
             <td style="font-size:12px" title="${esc(p.city)}">${esc(p.city)}</td>
             <td style="font-size:12px" title="${esc(p.org)}">${esc(p.org)}</td>

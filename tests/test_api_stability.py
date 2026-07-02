@@ -611,3 +611,167 @@ class TestPeersPanel:
 
         assert down == 300
         assert up == 200
+
+
+class TestVpnStatus:
+    """Fase 2.3/2.4: P2P/VPN marker files written by start.sh."""
+
+    def test_get_vpn_status_non_vpn_when_no_markers(self, monkeypatch, tmp_path):
+        from app.utils import vpn_status
+        monkeypatch.setattr(vpn_status, "_STATE_DIR", str(tmp_path))
+        status = vpn_status.get_vpn_status()
+        assert status["vpn_mode"] is False
+        assert status["active_p2p_port"] is None
+        assert status["gluetun_p2p_port"] is None
+        assert status["synced"] is None
+
+    def _write_marker(self, tmp_path, name, value):
+        (tmp_path / name).write_text(value)
+
+    def test_get_vpn_status_synced(self, monkeypatch, tmp_path):
+        from app.utils import vpn_status
+        monkeypatch.setattr(vpn_status, "_STATE_DIR", str(tmp_path))
+        self._write_marker(tmp_path, "vpn_mode", "1")
+        self._write_marker(tmp_path, "active_p2p_port", "48710")
+        self._write_marker(tmp_path, "gluetun_p2p_port", "48710")
+        status = vpn_status.get_vpn_status()
+        assert status["vpn_mode"] is True
+        assert status["synced"] is True
+
+    def test_get_vpn_status_desynced(self, monkeypatch, tmp_path):
+        from app.utils import vpn_status
+        monkeypatch.setattr(vpn_status, "_STATE_DIR", str(tmp_path))
+        self._write_marker(tmp_path, "vpn_mode", "1")
+        self._write_marker(tmp_path, "active_p2p_port", "48710")
+        self._write_marker(tmp_path, "gluetun_p2p_port", "59999")
+        status = vpn_status.get_vpn_status()
+        assert status["vpn_mode"] is True
+        assert status["synced"] is False
+
+    def test_get_vpn_status_gluetun_missing_is_unsynced(self, monkeypatch, tmp_path):
+        from app.utils import vpn_status
+        monkeypatch.setattr(vpn_status, "_STATE_DIR", str(tmp_path))
+        self._write_marker(tmp_path, "vpn_mode", "1")
+        self._write_marker(tmp_path, "active_p2p_port", "48710")
+        status = vpn_status.get_vpn_status()
+        assert status["synced"] is False
+
+
+class TestDeepHealthz:
+    """Fase 2.3: /healthz probes the engine and reports 503 when it's down."""
+
+    def test_healthz_engine_up_returns_200(self, client, monkeypatch):
+        from app.utils import acestream_api
+        monkeypatch.setattr(
+            acestream_api.AceStreamAPI, "get_version",
+            lambda self: {"version": "3.2.11", "platform": "linux"},
+        )
+        r = client.get("/healthz")
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["engine_up"] is True
+        assert body["version"] == "3.2.11"
+        assert "vpn_mode" in body
+        assert "synced" in body
+
+    def test_healthz_engine_down_returns_503(self, client, monkeypatch):
+        from app.utils import acestream_api
+        monkeypatch.setattr(acestream_api.AceStreamAPI, "get_version", lambda self: None)
+        r = client.get("/healthz")
+        assert r.status_code == 503
+        body = r.get_json()
+        assert body["engine_up"] is False
+        assert body["status"] == "degraded"
+
+
+class TestPeersStatusVpn:
+    """Fase 2.4: /api/peers/status exposes the VPN/P2P sync state."""
+
+    def test_status_payload_includes_vpn(self, authed, monkeypatch, tmp_path):
+        from app.utils import vpn_status
+        client, _ = authed
+        # Point vpn_status at a tmp dir with a synced VPN marker set.
+        monkeypatch.setattr(vpn_status, "_STATE_DIR", str(tmp_path))
+        (tmp_path / "vpn_mode").write_text("1")
+        (tmp_path / "active_p2p_port").write_text("48710")
+        (tmp_path / "gluetun_p2p_port").write_text("48710")
+
+        # Avoid network/psunit-heavy helpers; only the vpn field matters here.
+        panel._status_cache["data"] = None
+        panel._status_cache["ts"] = 0.0
+        monkeypatch.setattr(panel, "_get_ip_info", lambda: {})
+        monkeypatch.setattr(panel, "_get_engine_status", lambda h, p: {"up": False})
+        monkeypatch.setattr(panel, "_get_connections", lambda: ([], [], []))
+        monkeypatch.setattr(panel, "_get_acestream_peer_connections", lambda: [])
+        monkeypatch.setattr(panel, "_get_plugins_info", lambda: [])
+        monkeypatch.setattr(panel, "_build_name_map", lambda: {})
+
+        r = client.get("/api/peers/status")
+        assert r.status_code == 200
+        body = r.get_json()
+        assert "vpn" in body
+        assert body["vpn"]["vpn_mode"] is True
+        assert body["vpn"]["synced"] is True
+        assert body["vpn"]["active_p2p_port"] == "48710"
+
+
+class TestEngineScript:
+    """The shared engine.sh (sourced by start.sh and the dev entrypoint) must
+    ONLY define functions/vars — no side effects on source, so callers control
+    execution order. This is what lets the dev compose show VPN status."""
+
+    ENGINE_SH = os.path.join(os.path.dirname(__file__), "..", "engine.sh")
+
+    def test_bash_syntax_valid(self):
+        import subprocess
+        r = subprocess.run(["bash", "-n", self.ENGINE_SH], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+
+    def test_source_defines_all_functions_without_side_effects(self, tmp_path):
+        import subprocess
+        # Source into an isolated state dir; verify every function is declared
+        # and that sourcing produced no output (i.e. nothing executed).
+        checks = (
+            "set -e; "
+            "OPENACE_STATE_DIR=" + str(tmp_path).replace("'", "'\\''") + " "
+            "source " + self.ENGINE_SH + " ; "
+            "for f in config_value is_valid_port query_gluetun_port "
+            "resolve_p2p_port detect_vpn_mode start_engine port_watch_loop "
+            "engine_init; do "
+            "declare -F $f >/dev/null || { echo MISSING:$f; exit 1; }; done; "
+            "echo ALL_DEFINED"
+        )
+        r = subprocess.run(["bash", "-c", checks], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        assert "ALL_DEFINED" in r.stdout
+        # Sourcing must not have written any marker file or spawned anything.
+        assert list(tmp_path.iterdir()) == []
+        assert "Resolving P2P port" not in r.stdout
+
+    def test_resolve_p2p_port_fallback_chain(self, tmp_path):
+        """query/resolve via the control API, then file, then non-zero."""
+        import subprocess
+        forwarded = tmp_path / "forwarded_port"
+        # Set OPENACE_STATE_DIR (respected via :- in engine.sh) and override
+        # FORWARDED_PORT_FILE AFTER sourcing (engine.sh hardcodes it).
+        harness = (
+            "set -e; "
+            "OPENACE_STATE_DIR=" + str(tmp_path).replace("'", "'\\''") + " "
+            "source " + self.ENGINE_SH + " ; "
+            "FORWARDED_PORT_FILE=" + str(forwarded).replace("'", "'\\''") + " ; "
+            # 1) control API returns a port
+            "curl() { printf '{\"port\": 11111}\\n'; }; export -f curl; "
+            "p=$(resolve_p2p_port) && echo \"api:$p\"; "
+            # 2) control API down -> file fallback
+            "unset -f curl; curl() { return 22; }; export -f curl; "
+            "printf '22222\\n' > \"$FORWARDED_PORT_FILE\"; "
+            "p=$(resolve_p2p_port) && echo \"file:$p\"; "
+            # 3) neither -> non-zero
+            "rm -f \"$FORWARDED_PORT_FILE\"; "
+            "resolve_p2p_port && echo 'UNEXPECTED' || echo 'none:ok'"
+        )
+        r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        assert "api:11111" in r.stdout
+        assert "file:22222" in r.stdout
+        assert "none:ok" in r.stdout

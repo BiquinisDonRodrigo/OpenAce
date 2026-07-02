@@ -11,6 +11,8 @@ services:
       - VPN_TYPE=wireguard
       - WIREGUARD_PRIVATE_KEY=${WG_PRIVATE_KEY}
       - VPN_PORT_FORWARDING=on
+      - VPN_PORT_FORWARDING_PROVIDER=protonvpn
+      - FIREWALL_INPUT_DOCKER_NETWORK=on
       - SERVER_COUNTRIES=${ProtonCountries}
       - HTTP_CONTROL_SERVER_ADDRESS=:8001
       - HEALTH_TARGET_ADDRESSES=cloudflare.com:80
@@ -62,6 +64,7 @@ services:
     volumes:
       - ./app:/openace/app
       - ./server.py:/openace/server.py
+      - ./engine.sh:/openace/engine.sh:ro
       - ./gluetun-data:/tmp/gluetun
       - ./data:/openace/checkdb
     network_mode: service:acestream-vpn
@@ -71,24 +74,15 @@ services:
       - |
         set -e
         chown -R openace:openace /openace/checkdb /tmp/openace 2>/dev/null || true
-        FORWARDED_PORT_FILE="/tmp/gluetun/forwarded_port"
-        PORT=""
-        echo "[dev] Looking for Gluetun forwarded port..."
-        for i in {1..20}; do
-          if [[ -s "$$FORWARDED_PORT_FILE" ]]; then
-            PORT=$$(cat "$$FORWARDED_PORT_FILE")
-            echo "[dev] Got Gluetun port: $$PORT"
-            break
-          fi
-          echo "[dev] waiting for gluetun ($$i/20)"
-          sleep 1
-        done
-        if [[ -z "$$PORT" ]]; then
-          PORT=$$(gosu openace python3 -c 'from app.utils import environment_store; print(environment_store.get_str("ACESTREAM_PORT") or "6878")' 2>/dev/null || printf '6878')
-          echo "[dev] No forwarded port; fallback to $$PORT"
-        fi
-        echo "[dev] Starting AceStream engine on port $$PORT"
-        gosu openace /openace/start-engine --client-console --port "$$PORT" 2>&1 &
+        export PYTHONPATH=/openace
+        # Use the shared engine + Gluetun/VPN port-forward logic (same as
+        # start.sh in production). This writes the /tmp/openace markers
+        # (vpn_mode, active_p2p_port, gluetun_p2p_port) that the dashboard and
+        # /healthz read, and runs the port-forward watcher.
+        source /openace/engine.sh
+        engine_init
+        start_engine &
+        port_watch_loop &
         cd /openace
         gosu openace python -m babel.messages.frontend compile -d app/translations -D messages || true
         echo "[dev] Starting Flask dev server with reload on :8888"

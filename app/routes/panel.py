@@ -548,6 +548,9 @@ def api_status():
     engine = _get_engine_status(host, port)
     ip_info = _get_ip_info()
 
+    from app.utils.vpn_status import get_vpn_status
+    vpn = get_vpn_status()
+
     manager = hls_module._manager
     hls_streams = []
     if manager is not None:
@@ -576,6 +579,7 @@ def api_status():
         },
         "engine_peers": engine_peers,
         "active_streams": active_streams,
+        "vpn": vpn,
         "ts": int(time.time()),
     }
     with _status_cache_lock:
@@ -685,6 +689,7 @@ _PANEL_BODY = """
     <span class="hs"><span class="hs-label">Clientes</span><span id="hdr-clients">—</span></span>
     <span class="hs"><span class="hs-label">↓ Bajada</span><span class="hs-down" id="hdr-down">—</span></span>
     <span class="hs"><span class="hs-label">↑ Subida</span><span class="hs-up" id="hdr-up">—</span></span>
+    <span class="hs"><span class="hs-label">VPN</span><span id="hdr-vpn">—</span></span>
   </div>
   <span id="refresh-counter" aria-live="off" aria-hidden="true">actualizando…</span>
   <button type="button" class="refresh-pause" id="refresh-pause-btn" aria-pressed="false" aria-label="Pausar auto-refresh">⏸ Pausar</button>
@@ -840,6 +845,7 @@ function normalizeStatusPayload(data) {
     plugins: Array.isArray(data.plugins) ? data.plugins : [],
     engine_peers: Array.isArray(data.engine_peers) ? data.engine_peers : [],
     active_streams: Array.isArray(data.active_streams) ? data.active_streams : [],
+    vpn: data.vpn && typeof data.vpn === 'object' ? data.vpn : {},
     connections: {
       incoming: Array.isArray(conns.incoming) ? conns.incoming : [],
       outgoing_acestream: Array.isArray(conns.outgoing_acestream) ? conns.outgoing_acestream : [],
@@ -946,13 +952,30 @@ function render(data) {
   // Summary
   const conns = data.connections;
   const peers = data.engine_peers || [];
+  const vpn = data.vpn || {};
+  let vpnRows = '';
+  let hdrVpn = '—';
+  if (!vpn.vpn_mode) {
+    vpnRows = `<div class="stat-row"><span class="stat-label">VPN / Gluetun</span><span class="stat-value">${badge('Sin VPN','muted')}</span></div>`;
+    hdrVpn = badge('Sin VPN','muted');
+  } else {
+    const statusBadge = vpn.synced === true ? badge('Sincronizado','green')
+                      : (vpn.synced === false ? badge('Desincronizado','red') : badge('—','muted'));
+    vpnRows = `
+      <div class="stat-row"><span class="stat-label">VPN / Gluetun</span><span class="stat-value">${statusBadge}</span></div>
+      <div class="stat-row"><span class="stat-label">Puerto P2P motor</span><span class="stat-value mono">${esc(vpn.active_p2p_port || '—')}</span></div>
+      <div class="stat-row"><span class="stat-label">Puerto Gluetun</span><span class="stat-value mono">${esc(vpn.gluetun_p2p_port || '—')}</span></div>`;
+    hdrVpn = vpn.synced === false ? badge('DESINC','red')
+           : (vpn.synced === true ? badge('OK','green') : badge('VPN','blue'));
+  }
   document.getElementById('summary-content').innerHTML = `
     <div class="stat-row"><span class="stat-label">Clientes conectados</span><span class="stat-value">${badge(conns.incoming.length,'blue')}</span></div>
     <div class="stat-row"><span class="stat-label">Conexiones al motor</span><span class="stat-value">${badge(conns.outgoing_acestream.length,'blue')}</span></div>
     <div class="stat-row"><span class="stat-label">Peers P2P</span><span class="stat-value">${badge(peers.length, peers.length ? 'green' : 'muted')}</span></div>
     <div class="stat-row"><span class="stat-label">Conexiones externas</span><span class="stat-value">${badge(conns.outgoing_external.length,'muted')}</span></div>
     <div class="stat-row"><span class="stat-label">Streams FFMPEG</span><span class="stat-value">${badge(data.hls_streams.length, data.hls_streams.length ? 'green' : 'muted')}</span></div>
-    <div class="stat-row"><span class="stat-label">Plugins cargados</span><span class="stat-value">${badge(data.plugins.length,'blue')}</span></div>`;
+    <div class="stat-row"><span class="stat-label">Plugins cargados</span><span class="stat-value">${badge(data.plugins.length,'blue')}</span></div>
+    ${vpnRows}`;
 
   // Header totals
   document.getElementById('hdr-engine').innerHTML = e.up ? badge('ONLINE','green') : badge('OFFLINE','red');
@@ -960,6 +983,7 @@ function render(data) {
   document.getElementById('hdr-clients').textContent = conns.incoming.length;
   document.getElementById('hdr-down').textContent = fmt_speed(e.download_speed);
   document.getElementById('hdr-up').textContent = fmt_speed(e.upload_speed);
+  document.getElementById('hdr-vpn').innerHTML = hdrVpn;
 
   // Connection lists
   function renderList(id, items, emptyMsg) {

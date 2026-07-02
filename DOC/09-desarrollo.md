@@ -152,7 +152,7 @@ SQLite unica en `DB_PATH` (default `/openace/checkdb/data.db`). Seis dominios: p
 - **Campos por evento**: `timestamp` (UTC ISO-8601), `level`, `component`, `event` y campos arbitrarios.
 - **Componentes**: `play_proxy`, `hls_ffmpeg`, `ffmpeg_manager`, `playlist_proxy`, `acestream`, `check`, `check_runner`, `check_store`, `eula`, `plugins_api`, `plugin_refresh`, `core`.
 - **AceStream** tambien se redirige a stdout/stderr desde `start.sh`.
-- **Healthcheck Docker**: `curl -fsS http://127.0.0.1:8888/healthz` cada 30 s.
+- **Healthcheck Docker**: `curl -fsS http://127.0.0.1:8888/healthz` cada 30 s. Es un chequeo profundo: ademas de Flask prueba el motor AceStream y reporta la sincronizacion del puerto P2P con Gluetun (200 si el motor responde, 503 si esta caido).
 
 ```bash
 docker logs -f open-ace

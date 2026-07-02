@@ -20,7 +20,7 @@ Todos los endpoints expuestos por OpenAce.
 | Metodo | Ruta | Descripcion |
 |---|---|---|
 | GET | `/` | Healthcheck basico. Devuelve `OpenAce is running`. |
-| GET | `/healthz` | Healthcheck Docker. Devuelve `ok` y esta exento de setup/EULA/auth. |
+| GET | `/healthz` | Healthcheck Docker. Prueba el motor AceStream y reporta el estado VPN/P2P (puerto activo vs. Gluetun). HTTP 200 si el motor responde, 503 si esta caido. Exento de setup/EULA/auth. |
 | GET | `/<plugin>/mpegts.m3u` | Playlist M3U con URLs `/play/mpegts/<id>`. |
 | GET | `/<plugin>/hls.m3u` | Playlist M3U con URLs `/play/hls/<id>`. |
 | GET | `/play/mpegts/<content_id>` | Stream MPEG-TS generado por FFmpeg desde AceStream. |

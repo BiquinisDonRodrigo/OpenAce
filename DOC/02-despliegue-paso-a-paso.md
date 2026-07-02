@@ -77,7 +77,6 @@ cp env-example .env
 | `TZ` | Zona horaria del contenedor | `Europe/Madrid` |
 | `ACESTREAM_HOST` | Host del motor AceStream | `127.0.0.1` |
 | `ACESTREAM_PORT` | Puerto del motor AceStream | `6878` |
-| `ACESTREAM_IP` | IP publica opcional anunciada por AceStream | — |
 | `IPFS_GATEWAY` | URL del gateway IPFS local | `http://kubo:48080` |
 | `DB_PATH` | Ruta de la base de datos SQLite | `/openace/checkdb/data.db` |
 | `AUTH_ENABLED` | Activar/desactivar autenticacion | `true` |
@@ -100,7 +99,7 @@ cp env-example .env
 | `OPENACE_FFMPEG_RESTARTS` | Reintentos maximos de FFmpeg por stream | `3` |
 | `OPENACE_FFMPEG_RESTART_BACKOFF_S` | Espera entre reintentos de FFmpeg en segundos | `2` |
 | `OPENACE_HLS_STALE_SEGMENT_MAX_AGE_S` | Edad maxima de segmentos HLS obsoletos antes de limpieza | `30` |
-| `GUNICORN_WORKERS` | Numero de workers Gunicorn | `2` |
+| `GUNICORN_WORKERS` | Numero de workers Gunicorn | `1` |
 | `GUNICORN_WORKER_CONNECTIONS` | Conexiones gevent por worker | `2000` |
 
 ### Variables VPN (solo con Gluetun)
@@ -109,6 +108,12 @@ cp env-example .env
 |---|---|
 | `WG_PRIVATE_KEY` | Clave privada WireGuard |
 | `ProtonCountries` | Paises para la conexion VPN |
+
+Estas van en el `.env`. Ademas, los compose con VPN ya incluyen de serie las variables Gluetun necesarias para ProtonVPN: `VPN_PORT_FORWARDING_PROVIDER=protonvpn` (exigido por Gluetun >= v3.36 para habilitar el port forwarding de ProtonVPN) y `FIREWALL_INPUT_DOCKER_NETWORK=on` (permite el trafico inter-contenedor, p.ej. hacia Kubo).
+
+#### Port forwarding dinamico
+
+ProtonVPN rota el puerto forwardado en cada reconexion. `start.sh` resuelve el puerto P2P consultando la **Control API de Gluetun** (`http://127.0.0.1:8001/v1/port_forwarded`, con fallback al fichero `/tmp/gluetun/forwarded_port`) y lo pasa al motor via `--bind`, manteniendo la API del engine en `ACESTREAM_PORT` (6878). Un watcher en segundo plano (cada `PORT_WATCH_INTERVAL_S`, por defecto 45s) detecta cambios y **reinicia el motor** para re-vincular el nuevo puerto (los streams en curso se cortan unos segundos). El estado (puerto activo del motor, puerto reportado por Gluetun y sincronizacion) se muestra en el panel de Peers y en `/healthz`.
 
 ## Paso 3: Elegir modo de despliegue
 

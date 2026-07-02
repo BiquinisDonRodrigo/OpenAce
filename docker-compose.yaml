@@ -11,6 +11,8 @@ services:
       - VPN_TYPE=wireguard
       - WIREGUARD_PRIVATE_KEY=${WG_PRIVATE_KEY}
       - VPN_PORT_FORWARDING=on
+      - VPN_PORT_FORWARDING_PROVIDER=protonvpn
+      - FIREWALL_INPUT_DOCKER_NETWORK=on
       - SERVER_COUNTRIES=${ProtonCountries}
       - HTTP_CONTROL_SERVER_ADDRESS=:8001
       - HEALTH_TARGET_ADDRESSES=cloudflare.com:80

@@ -35,10 +35,19 @@ docker exec open-ace ls -la /tmp/openace/
 
 ### Gluetun no expone el puerto forwarded
 
-`start.sh` espera hasta 20 s a que aparezca `/tmp/gluetun/forwarded_port`. Si no lo encuentra, cae a `ACESTREAM_PORT` (6878). Causas posibles:
-- VPN sin port forwarding habilitado
-- Servidor en pais sin soporte
-- Clave WireGuard invalida
+`start.sh` espera hasta 20 s a que la **Control API de Gluetun** (`http://127.0.0.1:8001/v1/port_forwarded`) o el fichero `/tmp/gluetun/forwarded_port` devuelvan un puerto. Si no lo encuentra, cae a `ACESTREAM_PORT` (6878) y emite un WARNING (no aborta). Causas posibles:
+- `VPN_PORT_FORWARDING=on` sin `VPN_PORT_FORWARDING_PROVIDER=protonvpn` (exigido por Gluetun >= v3.36). Los compose de OpenAce ya lo incluyen; si usas uno propio, anadelo.
+- Plan ProtonVPN sin port forwarding (requiere plan de pago) o servidor en pais sin soporte.
+- Clave WireGuard invalida.
+
+Verifica el puerto actual y la salud de la VPN:
+
+```bash
+docker exec open-ace curl -s http://127.0.0.1:8001/v1/port_forwarded
+docker logs acestream-vpn
+```
+
+El puerto P2P activo del motor y el reportado por Gluetun pueden consultarse en el panel de **Peers** (seccion "VPN / Gluetun") o en `/healthz`. Si aparecen como "Desincronizado", el watcher re-vinculara el motor en el siguiente ciclo (~45 s).
 
 ### Los plugins con URL IPFS/IPNS no cargan canales
 

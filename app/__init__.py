@@ -326,7 +326,26 @@ def create_app():
 
     @app.route("/healthz")
     def healthz():
-       return "ok"
+        # Deep healthcheck: Flask is up by definition here, but we also probe
+        # the AceStream engine liveness and report the P2P/VPN port sync state
+        # written by start.sh. HTTP 503 when the engine is unreachable so the
+        # container surfaces as unhealthy (Docker's `restart` policy does not
+        # react to unhealthy, so this only informs the operator).
+        from app.utils.acestream_api import AceStreamAPI
+        from app.utils.vpn_status import get_vpn_status
+        host = app.config.get("ACESTREAM_HOST", "127.0.0.1")
+        port = str(app.config.get("ACESTREAM_PORT", "6878"))
+        api = AceStreamAPI(host, port)
+        version = api.get_version()
+        engine_up = version is not None
+        vpn = get_vpn_status()
+        body = {
+            "status": "ok" if engine_up else "degraded",
+            "engine_up": engine_up,
+            "version": version.get("version") if version else None,
+            **vpn,
+        }
+        return jsonify(body), (200 if engine_up else 503)
 
     @app.before_request
     def _setup_guard():

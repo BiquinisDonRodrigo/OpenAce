@@ -36,7 +36,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ /openace/app/
-COPY server.py start.sh babel.cfg ./
+COPY server.py start.sh engine.sh babel.cfg ./
 
 # Compile i18n message catalogs (.po -> .mo)
 RUN python -m babel.messages.frontend compile -d app/translations -D messages
